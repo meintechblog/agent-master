@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`/api/stop` now actually closes the Terminal tab.** Root cause: the expect-wrapper spawns claude in a child PTY, so the broker's `peer.tty` (claude's PTY) is different from the Terminal tab's `tty` (the parent shell where expect runs). The old tty-based AppleScript lookup never matched, no tab got closed. Fix: the server now keeps an in-memory `Map<repoKey, windowId>` populated at spawn time from the AppleScript window-id return value. `/api/stop` trusts that mapping first; tty-matching remains as a fallback for manually-started sessions where claude is the only PTY in the tab.
+- **`/api/stop` now actually closes the Terminal tab.** Two root causes, both fixed:
+  - *Tab lookup:* the claudepeers expect-wrapper spawns claude in a child PTY, so the broker's `peer.tty` (claude's PTY) differs from the Terminal tab's `tty` (the parent shell where expect runs). The old tty-based AppleScript lookup never matched, no tab got closed. The server now keeps an in-memory `Map<repoKey, windowId>` populated at spawn time from the AppleScript window-id return value; `/api/stop` trusts that mapping first, tty-match remains as a fallback for manually-started sessions.
+  - *Process kill:* SIGTERM-ing only `peer.pid` (claude) leaves the expect parent alive in the tab. Terminal.app treats expect as "a running process other than the shell" and prompts "Do you want to terminate running processes?" before closing. Fix: also SIGTERM (and SIGKILL after the 1.5 s grace period) claude's parent process — the expect wrapper. The login shell is left alone.
 - **`claudepeers` wrapper now actually dismisses the prompt.** First version anchored on the string `Enter to confirm`, which doesn't match because Claude's TUI fragments that phrase across the byte stream with ANSI cursor-positioning escapes (`Enter[9Gto[12Gconfirm`). Switched the anchor to `cancel` (a contiguous 6-byte token from "Esc to cancel" at the end of the prompt) plus a 5 s timeout fallback that sends Enter anyway. Result: dismissal works reliably.
 
 ### Changed

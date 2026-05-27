@@ -8,7 +8,7 @@ import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AGENT_HUB_PORT || "7890", 10);
@@ -196,18 +196,42 @@ async function stopAgent(repoKey, registry) {
   }
   await log(`lookup result="${findRaw}" wid=${targetWid} tab=${targetTab}`);
 
+  // claude runs as a child of the claudepeers expect-wrapper. SIGTERM-ing only
+  // claude leaves expect alive in the tab, which Terminal.app treats as a
+  // "running process" and triggers the "kill running processes?" confirmation
+  // dialog when we try to close the tab. Solution: also SIGTERM claude's parent
+  // (expect). The grandparent (the user's login shell) is left alone — we don't
+  // want to terminate that.
+  let expectPid = null;
+  if (peer.pid) {
+    try {
+      const out = execSync(`ps -o ppid= -p ${peer.pid}`, { stdio: ["pipe", "pipe", "ignore"] }).toString().trim();
+      const parsed = parseInt(out, 10);
+      if (Number.isFinite(parsed) && parsed > 1) expectPid = parsed;
+    } catch {}
+  }
+  await log(`pid-tree claude=${peer.pid || "?"} parent=${expectPid || "?"}`);
+
   let signaled = false;
   if (peer.pid) {
     try {
       process.kill(peer.pid, "SIGTERM");
       signaled = true;
     } catch (e) {
-      await log(`SIGTERM failed: ${e.message}`);
+      await log(`SIGTERM claude failed: ${e.message}`);
     }
   }
-  await log(`sigterm sent=${signaled}, waiting 1500ms…`);
+  if (expectPid) {
+    try { process.kill(expectPid, "SIGTERM"); } catch (e) { await log(`SIGTERM parent failed: ${e.message}`); }
+  }
+  await log(`sigterm sent=${signaled} parent=${!!expectPid}, waiting 1500ms…`);
 
   await new Promise((r) => setTimeout(r, 1500));
+
+  // Force-kill any survivors so the tab is definitely non-busy when we close it.
+  for (const pid of [peer.pid, expectPid].filter(Boolean)) {
+    try { process.kill(pid, "SIGKILL"); } catch {} // ESRCH = already gone, fine
+  }
 
   let tabClosed = false;
   let closeErr = null;
