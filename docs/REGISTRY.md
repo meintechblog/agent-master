@@ -10,6 +10,11 @@
     "version": 2,
     "updated_at": "ISO-8601",
     "maintained_by": "string",
+    "operator": "string (first name of the human operator — referenced in peer messages and WA replies)",
+    "operator_wa": "+49… (E.164 phone, used by wa-bridge as the routing target)",
+    "operator_github": "github-username",
+    "hub_name": "string (name the Hub agent identifies as toward peers — e.g. 'Hulki', 'Aurora'. Distinct from the operator name.)",
+    "naming_policy": "free-text reminder for peers: Hub-Agent has its own name (≠ the human's name). Helps avoid mixing them up in messages.",
     "spawn_command": "claudepeers",
     "spawn_pattern": "AppleScript … (informational)",
     "doc_ref": "path or URL",
@@ -21,6 +26,8 @@
 }
 ```
 
+The `operator` / `hub_name` separation is intentional: peers should refer to the human by `operator` (e.g. "Jörg") and to the Hub agent by `hub_name` or the Hub's `display_name` (e.g. "Hulki"). Mixing them up makes peer-to-peer routing decisions ambiguous ("send this to Jörg" vs. "send this to the Hub").
+
 `<key>` is the short slug used in URLs and the UI (e.g. `demo-domain-lxc`). Should match a directory name in `~/codex/` for the spawner to find the repo, unless `repo` is explicitly set.
 
 ## Per-agent fields
@@ -29,6 +36,7 @@
 |---|---|---|---|---|
 | `repo` | string (absolute path) | yes | spawner | Where to `cd` before running `claudepeers` |
 | `role` | `"Hub" \| "Bridge" \| "Domain" \| "Infra"` | yes | UI | Sidebar sort + color badge |
+| `display_name` | string | optional | UI, peers | Human-friendly name the agent identifies as (e.g. `"Hulki"` for the Hub). Falls back to the registry key if absent. |
 | `description` | string | yes | UI | One-liner in the main panel |
 | `capabilities` | string[] | recommended | UI | Skill chips |
 | `when_to_use` | string[] | recommended | UI | Bulleted list of situations |

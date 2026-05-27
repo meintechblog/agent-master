@@ -2,17 +2,23 @@
   "_meta": {
     "version": 2,
     "updated_at": "2026-05-27T00:00:00Z",
-    "maintained_by": "you",
+    "maintained_by": "your-hub-agent (or just 'you')",
+    "operator": "You (or your real first name — referenced in WA replies and peer messages so other agents know who the human is)",
+    "operator_wa": "+49…",
+    "operator_github": "your-github-username",
+    "hub_name": "Whatever you want your Hub-Agent to call itself toward peers and in WA (e.g. \"Aurora\", \"Cortex\", or a person-style name). Keep it consistent.",
+    "naming_policy": "Optional but recommended: state explicitly that the Hub agent has a different name than the human operator, so peers don't conflate them.",
     "spawn_command": "claudepeers",
-    "spawn_pattern": "AppleScript Cmd+T new tab → claudepeers in repo dir → AppleScript Enter to dismiss dev-channel dialog",
+    "spawn_pattern": "AppleScript Cmd+T new tab → claudepeers (expect-wrapper auto-dismisses dev-channel prompt) → broker polling until registered",
     "doc_ref": "docs/REGISTRY.md",
-    "schema_doc": "See docs/REGISTRY.md for field reference. Copy this file to data/registry.json and edit to register your own agents."
+    "schema_doc": "See docs/REGISTRY.md for the field reference. Copy this file to data/registry.json and edit to register your own agents."
   },
   "agents": {
     "demo-hub": {
       "repo": "/Users/you/code/demo-hub",
       "role": "Hub",
-      "description": "Example Hub agent — routes messages between domain agents and orchestrates spawns.",
+      "display_name": "Aurora",
+      "description": "Example Hub agent — routes messages between domain agents and orchestrates spawns. Toward peers and in WA replies it identifies as 'Aurora' (the display_name) — different from the human operator's name.",
       "capabilities": ["routing", "orchestration", "registry-maintenance"],
       "when_to_use": ["Cross-agent question", "Spawn coordination", "Overview of running sessions"],
       "deployment": { "type": "claude-code-session", "host": "Mac (local session)" },

@@ -361,7 +361,7 @@
 </head>
 <body>
 <header>
-  <h1>🛰 agent-master</h1>
+  <h1>🛰 agent-master <span id="hub-name" style="font-size:13px;color:var(--text-dim);font-weight:400;margin-left:4px"></span></h1>
   <div class="sse-pill" id="sse-pill">connecting…</div>
   <div class="usage-bar" id="usage-bar">
     <div class="empty-tip">lade Limit…</div>
@@ -597,10 +597,13 @@ function renderContent() {
     ? `<button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Stop + Tab schließen</button>`
     : `<button class="btn btn-primary" onclick="handleSpawn('${active}')">⚡ Spawn jetzt</button>`;
 
+  const displayName = a.display_name && a.display_name !== active
+    ? `<span style="font-size:14px;color:var(--text-dim);font-weight:400;margin-left:2px">· ${a.display_name}</span>`
+    : "";
   main.innerHTML = `
     <h2 class="panel-title">
       <span style="color:${a.color || "var(--text)"}">●</span>
-      ${active}
+      ${active}${displayName}
       <span class="role-badge role-${a.role}">${a.role}</span>
       ${tags}
     </h2>
@@ -707,6 +710,15 @@ function render() {
   document.getElementById("online-count").textContent = state.online_count;
   document.getElementById("total-count").textContent = state.total_count;
   document.getElementById("last-update").textContent = fmtTime();
+  const hubName = state.meta?.hub_name;
+  const operator = state.meta?.operator;
+  const hubEl = document.getElementById("hub-name");
+  if (hubEl && (hubName || operator)) {
+    const parts = [];
+    if (hubName) parts.push(`hub: ${hubName}`);
+    if (operator) parts.push(`operator: ${operator}`);
+    hubEl.textContent = "(" + parts.join(" · ") + ")";
+  }
 }
 
 async function refreshHealthInBackground() {

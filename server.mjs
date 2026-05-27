@@ -420,6 +420,7 @@ async function broadcastStatus() {
       agents,
       online_count: peers.length,
       total_count: Object.keys(registry.agents).length,
+      meta: registry._meta || null,
       updated_at: new Date().toISOString(),
     };
     for (const res of sseClients) sseSend(res, "status", payload);
@@ -478,6 +479,7 @@ async function handleApi(req, res, url) {
       agents,
       online_count: peers.length,
       total_count: Object.keys(registry.agents).length,
+      meta: registry._meta || null,
       updated_at: new Date().toISOString(),
     });
   }
