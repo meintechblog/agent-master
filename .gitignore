@@ -17,3 +17,7 @@ node_modules/
 # Local plist patches (installer regenerates per machine)
 launchd/*.local.plist
 .planning/
+
+# Playwright / browser-driven testing artifacts (transient)
+.playwright-mcp/
+*.png

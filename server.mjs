@@ -154,6 +154,17 @@ function parseFrontmatter(text) {
   return result;
 }
 
+// Normalize `allowed-tools` from frontmatter into a string[]. YAML inline-style
+// (`allowed-tools: Read, Bash`) produces a string; block-style (`- Read`) gives
+// us an array directly. The UI expects always-array.
+function normalizeAllowedTools(raw) {
+  if (Array.isArray(raw)) return raw.map(String).map((s) => s.trim()).filter(Boolean);
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
 function clusterForSkill(name, pluginPrefix) {
   if (pluginPrefix === "browse") return "Browser";
   if (pluginPrefix === "frontend-design") return "Frontend";
@@ -197,7 +208,7 @@ async function scanPluginSkills() {
               marketplace: mp.name,
               description: fm.description || "",
               argument_hint: fm["argument-hint"] || null,
-              allowed_tools: fm["allowed-tools"] || [],
+              allowed_tools: normalizeAllowedTools(fm["allowed-tools"]),
               cluster: clusterForSkill(baseName, pl.name),
               path: mdPath,
             });
@@ -264,6 +275,30 @@ async function readSkills({ force = false } = {}) {
   };
   skillsCache = { data, fetched_at: now };
   return { ...data, cached: false, age_ms: 0 };
+}
+
+// Strip YAML frontmatter from a SKILL.md and return the body. Used by the
+// /api/skills/body endpoint to feed the detail-panel in the Skills tab.
+function stripFrontmatter(text) {
+  const lines = text.split("\n");
+  if (lines[0]?.trim() !== "---") return text;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") return lines.slice(i + 1).join("\n").replace(/^\n+/, "");
+  }
+  return text;
+}
+
+// Resolve a user-supplied path against the two trusted roots and return the
+// absolute path, or null if it escapes both. Prevents path-traversal — only
+// files under ~/.claude/skills/ or ~/.claude/plugins/cache/ may be read.
+function safeSkillPath(input) {
+  if (!input) return null;
+  const abs = path.resolve(input);
+  const userRoot = path.resolve(SKILLS_DIR) + path.sep;
+  const pluginRoot = path.resolve(PLUGINS_CACHE_DIR) + path.sep;
+  if (!abs.startsWith(userRoot) && !abs.startsWith(pluginRoot)) return null;
+  if (path.basename(abs) !== "SKILL.md") return null;
+  return abs;
 }
 
 async function sendChannelMessage(toPeerId, text) {
@@ -868,6 +903,8 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
         { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
           query: { refresh: "1 to bypass the 5 min cache" } },
+        { method: "GET",  path: "/api/skills/body",      purpose: "full SKILL.md body (post-frontmatter) for one skill — for the UI detail panel",
+          query: { path: "absolute path returned by /api/skills (must be under ~/.claude/skills/ or ~/.claude/plugins/cache/)" } },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -876,6 +913,17 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skills") {
     const force = url.searchParams.get("refresh") === "1";
     return send(200, await readSkills({ force }));
+  }
+
+  // Return the body (post-frontmatter) of one SKILL.md. Path must be one
+  // returned by /api/skills (validated against the two trusted roots).
+  if (req.method === "GET" && url.pathname === "/api/skills/body") {
+    const requested = url.searchParams.get("path");
+    const abs = safeSkillPath(requested);
+    if (!abs) return send(400, { error: "invalid_path", hint: "path must be a SKILL.md under ~/.claude/skills/ or ~/.claude/plugins/cache/" });
+    if (!existsSync(abs)) return send(404, { error: "not_found", path: abs });
+    const raw = await fs.readFile(abs, "utf8");
+    return send(200, { path: abs, body: stripFrontmatter(raw), bytes: raw.length });
   }
 
   // Discovery: filtered agent list. Lets a peer ask "give me agents that can X"

@@ -392,6 +392,147 @@
     color: var(--text-dim);
     border-radius: 8px;
   }
+  .skill-card { cursor: pointer; transition: border-color 80ms, transform 80ms; }
+  .skill-card:active { transform: translateY(1px); }
+  .skill-card .head { gap: 6px; }
+  .skill-card .fav {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+    line-height: 1;
+    transition: color 80ms;
+  }
+  .skill-card .fav:hover { color: var(--yellow); }
+  .skill-card .fav.on { color: var(--yellow); }
+  .skill-card .copy {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    transition: all 80ms;
+    user-select: none;
+  }
+  .skill-card .copy:hover { color: var(--text); border-color: var(--text-dim); }
+  .skill-card .copy.ok { color: var(--green); border-color: var(--green); }
+  .skill-card .src-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .skill-card .src-badge.plugin { color: var(--text-dim); border-color: var(--text-dim); }
+  .skill-card .src-badge.user   { color: var(--accent);  border-color: var(--accent); }
+  .skill-card.favorite { border-color: rgba(253, 203, 110, 0.45); }
+
+  /* Skill detail modal */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    backdrop-filter: blur(2px);
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    max-width: 880px;
+    width: 100%;
+    max-height: calc(100vh - 64px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-head {
+    padding: 16px 22px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .modal-head .modal-title {
+    flex: 1;
+    font-size: 16px;
+    font-weight: 700;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .modal-head .modal-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 22px;
+    padding: 0 8px;
+    line-height: 1;
+  }
+  .modal-head .modal-close:hover { color: var(--text); }
+  .modal-meta {
+    padding: 10px 22px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-meta .key { color: var(--text); font-weight: 600; }
+  .modal-meta code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text);
+    background: var(--panel-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+  .modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 22px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    color: var(--text);
+  }
+  .modal-foot {
+    padding: 12px 22px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    z-index: 2000;
+    opacity: 0;
+    transition: opacity 180ms;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
   .panel-section {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -532,6 +673,24 @@
   </div>
 </section>
 
+<!-- Skill detail modal -->
+<div class="modal-overlay" id="skill-modal" onclick="if(event.target===this)closeSkillModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="modal-title" id="skill-modal-title">…</span>
+      <button class="modal-close" onclick="closeSkillModal()" title="Schließen (Esc)">×</button>
+    </div>
+    <div class="modal-meta" id="skill-modal-meta"></div>
+    <div class="modal-body" id="skill-modal-body">Lade…</div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary" id="skill-modal-copy" onclick="copySkillCommandFromModal()">📋 Copy /command</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast for clipboard / favorite feedback -->
+<div class="toast" id="toast"></div>
+
 <script>
 let state = { agents: {}, online_count: 0, total_count: 0 };
 let healthData = { checks: {} };
@@ -542,6 +701,91 @@ let es = null;
 let view = "agents";
 let skillsData = null; // {skills, clusters, count, ...}
 let skillsActiveCluster = "All";
+let skillFavorites = new Set(JSON.parse(localStorage.getItem("skillFavorites") || "[]"));
+let openSkill = null; // currently-open skill in the detail modal
+
+function persistFavorites() {
+  localStorage.setItem("skillFavorites", JSON.stringify([...skillFavorites]));
+}
+function toggleSkillFavorite(name, ev) {
+  ev?.stopPropagation();
+  if (skillFavorites.has(name)) { skillFavorites.delete(name); showToast(`★ ${name} aus Favoriten entfernt`); }
+  else { skillFavorites.add(name); showToast(`★ ${name} zu Favoriten hinzugefügt`); }
+  persistFavorites();
+  renderSkills();
+}
+
+let toastTimer = null;
+function showToast(text) {
+  const t = document.getElementById("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+async function copySkillCommand(skillName, ev) {
+  ev?.stopPropagation();
+  const cmd = "/" + skillName;
+  try {
+    await navigator.clipboard.writeText(cmd);
+    showToast(`Kopiert: ${cmd}`);
+    if (ev?.currentTarget) {
+      const btn = ev.currentTarget;
+      const orig = btn.textContent;
+      btn.textContent = "✓";
+      btn.classList.add("ok");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("ok"); }, 1200);
+    }
+  } catch (e) {
+    showToast("Clipboard-Fehler: " + e.message);
+  }
+}
+
+function copySkillCommandFromModal() {
+  if (!openSkill) return;
+  copySkillCommand(openSkill.name);
+}
+
+async function openSkillModal(skill) {
+  openSkill = skill;
+  document.getElementById("skill-modal-title").textContent = "/" + skill.name;
+  const metaEl = document.getElementById("skill-modal-meta");
+  const tools = (skill.allowed_tools || []).map((t) => `<code>${escapeHtml(t)}</code>`).join(" ");
+  metaEl.innerHTML = [
+    `<span><span class="key">Cluster</span> ${escapeHtml(skill.cluster)}</span>`,
+    skill.plugin ? `<span><span class="key">Plugin</span> ${escapeHtml(skill.plugin)}</span>` : `<span><span class="key">Source</span> user-dir</span>`,
+    skill.argument_hint ? `<span><span class="key">Args</span> <code>${escapeHtml(skill.argument_hint)}</code></span>` : "",
+    tools ? `<span><span class="key">Tools</span> ${tools}</span>` : "",
+    `<span><span class="key">Path</span> <code>${escapeHtml(skill.path)}</code></span>`,
+  ].filter(Boolean).join("");
+  const bodyEl = document.getElementById("skill-modal-body");
+  bodyEl.textContent = "Lade SKILL.md …";
+  document.getElementById("skill-modal").classList.add("open");
+  try {
+    const r = await fetch("/api/skills/body?path=" + encodeURIComponent(skill.path));
+    const data = await r.json();
+    if (data.error) {
+      bodyEl.textContent = "Fehler: " + data.error + (data.hint ? "\n\n" + data.hint : "");
+    } else {
+      const desc = skill.description ? skill.description + "\n\n" : "";
+      bodyEl.textContent = desc + (data.body || "(kein Body — nur Frontmatter)");
+    }
+  } catch (e) {
+    bodyEl.textContent = "Netzwerk-Fehler: " + e.message;
+  }
+}
+
+function closeSkillModal() {
+  document.getElementById("skill-modal").classList.remove("open");
+  openSkill = null;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.getElementById("skill-modal")?.classList.contains("open")) {
+    closeSkillModal();
+  }
+});
 
 function fmtCost(n) { return "$" + (n || 0).toFixed(2); }
 function fmtTok(n) { if (n > 1e6) return (n / 1e6).toFixed(1) + "M"; if (n > 1e3) return (n / 1e3).toFixed(1) + "k"; return String(n || 0); }
@@ -965,25 +1209,50 @@ function renderSkills() {
     if (q && !s.name.toLowerCase().includes(q) && !(s.description || "").toLowerCase().includes(q)) return false;
     return true;
   });
+  // Favorites first, then alphabetical (server already alpha-sorted).
+  filtered.sort((a, b) => {
+    const af = skillFavorites.has(a.name) ? 0 : 1;
+    const bf = skillFavorites.has(b.name) ? 0 : 1;
+    if (af !== bf) return af - bf;
+    return a.name.localeCompare(b.name);
+  });
+  const favCount = filtered.filter((s) => skillFavorites.has(s.name)).length;
   document.getElementById("skills-count").textContent =
-    `${filtered.length} von ${skillsData.count} Skills` + (skillsData.cached ? ` · cached ${Math.round(skillsData.age_ms / 1000)}s` : " · fresh");
+    `${filtered.length} von ${skillsData.count} Skills`
+    + (favCount ? ` · ★ ${favCount}` : "")
+    + (skillsData.cached ? ` · cached ${Math.round(skillsData.age_ms / 1000)}s` : " · fresh");
   if (!filtered.length) {
     grid.innerHTML = `<div class="empty-tip">Keine Treffer.</div>`;
     return;
   }
-  grid.innerHTML = filtered.map((s) => {
-    const tools = (s.allowed_tools || []).map((t) => `<span class="chip">${t}</span>`).join("");
+  grid.innerHTML = filtered.map((s, i) => {
+    const tools = (s.allowed_tools || []).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("");
+    const isFav = skillFavorites.has(s.name);
+    const srcBadge = s.plugin
+      ? `<span class="src-badge plugin" title="from plugin: ${escapeHtml(s.plugin)}">P</span>`
+      : `<span class="src-badge user" title="from ~/.claude/skills/">U</span>`;
     return `
-      <div class="skill-card">
+      <div class="skill-card${isFav ? " favorite" : ""}" data-skill-idx="${i}" onclick="openSkillByIdx(${i})">
         <div class="head">
+          <button class="fav${isFav ? " on" : ""}" onclick="toggleSkillFavorite('${escapeHtml(s.name).replace(/'/g, "\\'")}', event)" title="${isFav ? "Aus Favoriten entfernen" : "Zu Favoriten hinzufügen"}">${isFav ? "★" : "☆"}</button>
           <span class="name">${s.name}</span>
+          ${srcBadge}
           <span class="cluster-tag ${s.cluster}">${s.cluster}</span>
+          <button class="copy" onclick="copySkillCommand('${escapeHtml(s.name).replace(/'/g, "\\'")}', event)" title="Copy /command to clipboard">📋</button>
         </div>
         ${s.description ? `<div class="desc">${escapeHtml(s.description)}</div>` : ""}
         ${s.argument_hint ? `<div class="arg-hint">${escapeHtml(s.argument_hint)}</div>` : ""}
         ${tools ? `<div class="tools">${tools}</div>` : ""}
       </div>`;
   }).join("");
+  // Store filtered order so openSkillByIdx finds the right object.
+  grid._filteredSkills = filtered;
+}
+
+function openSkillByIdx(i) {
+  const grid = document.getElementById("skills-grid");
+  const skill = grid._filteredSkills?.[i];
+  if (skill) openSkillModal(skill);
 }
 
 function escapeHtml(s) {
