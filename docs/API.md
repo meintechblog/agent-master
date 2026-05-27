@@ -4,6 +4,64 @@ Base URL: `http://localhost:7890` (or whatever `AGENT_HUB_PORT` is set to).
 
 All responses are JSON unless noted. No auth — LAN-only.
 
+## `GET /api`
+
+Self-describing index. Returns the list of all endpoints with method, path, purpose, and (for `POST` requests) the expected body shape. Other agents can hit this to discover the surface without grep-ing the docs.
+
+```json
+{
+  "service": "agent-master",
+  "version": "0.2",
+  "endpoints": [
+    { "method": "GET",  "path": "/api/status",  "purpose": "all agents + live state + meta" },
+    { "method": "GET",  "path": "/api/agents",  "purpose": "filtered agent list",
+      "query": { "capability": "…", "role": "Hub|Bridge|Domain|Infra", "tag": "…", "live": "true|false" } },
+    { "method": "POST", "path": "/api/spawn",   "purpose": "spawn an agent",  "body": { "agent": "<key>" } },
+    "..."
+  ],
+  "notes": "All responses are JSON. No auth — LAN only."
+}
+```
+
+## `GET /api/agents`
+
+Filterable agent discovery. Combine query params as needed:
+
+| Param | Effect |
+|---|---|
+| `capability=X` | Only agents whose `capabilities` array contains `X` |
+| `role=Hub` | Filter by role (`Hub`, `Bridge`, `Domain`, `Infra`) |
+| `tag=Y` | Only agents with tag `Y` in their `tags` array |
+| `live=true` | Only currently-live agents (broker-registered) |
+| `live=false` | Only offline agents |
+
+Example: *"find me live Domain agents that can publish to MQTT"*
+
+```bash
+curl 'http://localhost:7890/api/agents?capability=mqtt-publishing&role=Domain&live=true'
+```
+
+Response:
+
+```json
+{
+  "matches": [
+    {
+      "key": "demo-domain-lxc",
+      "role": "Domain",
+      "display_name": null,
+      "description": "Example domain agent…",
+      "capabilities": ["http-api", "metrics-collection"],
+      "tags": ["demo", "lxc"],
+      "live": true,
+      "repo": "/Users/you/code/demo-domain-lxc"
+    }
+  ],
+  "count": 1,
+  "filters": { "capability": "mqtt-publishing", "role": "Domain", "tag": null, "live": "true" }
+}
+```
+
 ## `GET /api/status`
 
 The big aggregate call. Used by the UI on first paint.

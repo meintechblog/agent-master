@@ -1,6 +1,7 @@
 # Runtime state
 data/*.log
 data/spawn.log
+data/spawned-windows.json
 
 # Local user registry — derived from data/registry.example.json on first install.
 # Each user maintains their own.

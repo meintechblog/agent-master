@@ -40,7 +40,19 @@ let healthCache = { data: null, fetched_at: 0 };
 // tab and the claude process: the tab's tty differs from peer.tty in the
 // broker, so we can't tty-match anymore. We trust the window-id we captured
 // at spawn time instead.
+const SPAWNED_WINDOWS_PATH = path.join(__dirname, "data", "spawned-windows.json");
 const spawnedWindows = new Map();
+try {
+  if (existsSync(SPAWNED_WINDOWS_PATH)) {
+    const raw = JSON.parse(await fs.readFile(SPAWNED_WINDOWS_PATH, "utf8"));
+    for (const [k, v] of Object.entries(raw)) spawnedWindows.set(k, v);
+  }
+} catch (e) {
+  console.warn("[spawned-windows] could not load:", e.message);
+}
+function persistSpawnedWindows() {
+  fs.writeFile(SPAWNED_WINDOWS_PATH, JSON.stringify(Object.fromEntries(spawnedWindows), null, 2)).catch(() => {});
+}
 
 async function readRegistry() {
   const target = existsSync(REGISTRY_PATH) ? REGISTRY_PATH : REGISTRY_EXAMPLE_PATH;
@@ -97,7 +109,27 @@ async function spawnAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
   if (!agent) throw new Error(`unknown agent: ${repoKey}`);
   const cwd = agent.repo;
-  if (!existsSync(cwd)) throw new Error(`repo dir missing: ${cwd}`);
+  if (!existsSync(cwd)) {
+    // Optional: auto-clone if the agent declares a repo_url and gh CLI is around.
+    // Saves the "spawn fails → clone manually → spawn again" round-trip.
+    const repoUrl = (agent.repo_url || "").replace(/\s*\(.*\)\s*$/, "").trim(); // strip "(privat)" suffixes
+    if (repoUrl && /^https?:\/\//.test(repoUrl)) {
+      try {
+        await fs.mkdir(path.dirname(cwd), { recursive: true });
+        await new Promise((resolve, reject) => {
+          const child = spawn("gh", ["repo", "clone", repoUrl, cwd]);
+          let stderr = "";
+          child.stderr.on("data", (d) => (stderr += d));
+          child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`gh clone failed (${code}): ${stderr.slice(0, 200)}`))));
+        });
+        await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} auto-clone ${repoKey} from=${repoUrl} → ${cwd}\n`);
+      } catch (e) {
+        throw new Error(`repo dir missing and auto-clone failed: ${e.message}`);
+      }
+    } else {
+      throw new Error(`repo dir missing: ${cwd}`);
+    }
+  }
 
   const cjPath = path.join(process.env.HOME, ".claude.json");
   const cj = JSON.parse(await fs.readFile(cjPath, "utf8"));
@@ -124,7 +156,10 @@ async function spawnAgent(repoKey, registry) {
     end tell
   `;
   const wid = parseInt(await runOsa(script), 10);
-  if (Number.isFinite(wid)) spawnedWindows.set(repoKey, wid);
+  if (Number.isFinite(wid)) {
+    spawnedWindows.set(repoKey, wid);
+    persistSpawnedWindows();
+  }
 
   const peer = await waitForPeerRegistration(cwd);
   await fs.appendFile(
@@ -264,7 +299,10 @@ async function stopAgent(repoKey, registry) {
   }
 
   await log(`done signaled=${signaled} tabClosed=${tabClosed}${closeErr ? ` closeErr=${closeErr}` : ""}`);
-  if (tabClosed) spawnedWindows.delete(repoKey);
+  if (tabClosed) {
+    spawnedWindows.delete(repoKey);
+    persistSpawnedWindows();
+  }
   return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty: ttyRaw, ttyFull, findRaw, targetWid, targetTab, closeErr } };
 }
 
@@ -485,6 +523,51 @@ async function handleApi(req, res, url) {
     res.end(JSON.stringify(obj, null, 2));
   };
 
+  // Self-describing API index — for agents that want to discover endpoints.
+  if (req.method === "GET" && (url.pathname === "/api" || url.pathname === "/api/")) {
+    return send(200, {
+      service: "agent-master",
+      version: "0.2",
+      endpoints: [
+        { method: "GET",  path: "/api",                  purpose: "this index" },
+        { method: "GET",  path: "/api/status",           purpose: "all agents + live state + meta" },
+        { method: "GET",  path: "/api/agents",           purpose: "filtered agent list",
+          query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
+        { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
+        { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
+        { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached" },
+        { method: "GET",  path: "/api/usage",            purpose: "ccusage cost overlay (5 min cached)" },
+        { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
+        { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
+        { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
+        { method: "POST", path: "/api/stop",             purpose: "stop an agent",    body: { agent: "<key>" } },
+      ],
+      notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
+    });
+  }
+
+  // Discovery: filtered agent list. Lets a peer ask "give me agents that can X"
+  // without grep-ing the whole registry.
+  if (req.method === "GET" && url.pathname === "/api/agents") {
+    const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
+    const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
+    const capFilter = url.searchParams.get("capability");
+    const roleFilter = url.searchParams.get("role");
+    const tagFilter  = url.searchParams.get("tag");
+    const liveFilter = url.searchParams.get("live");
+    const matches = [];
+    for (const [key, agent] of Object.entries(registry.agents)) {
+      const live = !!resolveLive(agent, registry, liveByCwd);
+      if (capFilter  && !(agent.capabilities || []).includes(capFilter))  continue;
+      if (roleFilter && agent.role !== roleFilter)                         continue;
+      if (tagFilter  && !(agent.tags || []).includes(tagFilter))           continue;
+      if (liveFilter === "true"  && !live)                                 continue;
+      if (liveFilter === "false" &&  live)                                 continue;
+      matches.push({ key, role: agent.role, display_name: agent.display_name || null, description: agent.description, capabilities: agent.capabilities || [], tags: agent.tags || [], live, repo: agent.repo });
+    }
+    return send(200, { matches, count: matches.length, filters: { capability: capFilter, role: roleFilter, tag: tagFilter, live: liveFilter } });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/registry") return send(200, await readRegistry());
 
   if (req.method === "GET" && url.pathname === "/api/peers") {
@@ -611,7 +694,7 @@ async function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
     return await serveStatic(req, res, url);
   } catch (e) {
     res.writeHead(500, { "Content-Type": "application/json" });

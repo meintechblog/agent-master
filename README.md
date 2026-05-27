@@ -112,15 +112,17 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/API.md`](docs/API.
 | Path | Method | Use |
 |---|---|---|
 | `/` | GET | Web UI |
-| `/api/status` | GET | Agents + live-status + counts |
+| `/api` | GET | Self-describing index — list every endpoint with purpose + body schema. Hit this from another agent to discover the surface. |
+| `/api/status` | GET | Agents + live-status + counts + registry `_meta` |
+| `/api/agents` | GET `?capability=X&role=Y&tag=Z&live=true` | Filtered agent list — for capability-based discovery from other peers |
 | `/api/registry` | GET | Raw `registry.json` |
 | `/api/peers` | GET | Broker peers + agent metadata merged |
 | `/api/usage` | GET `?refresh=1` | ccusage active block + 7d totals (5min cache) |
 | `/api/plan-usage` | GET `?refresh=1` | Claude-Code plan %-utilization (5h + 7d, 5min cache) |
 | `/api/health` | GET `?refresh=1` | Parallel health-check pings (60s cache) |
 | `/api/events` | GET | **SSE stream** — `status` (3s), `usage` + `plan_usage` (5min) |
-| `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab |
-| `/api/stop` | POST `{agent:"<key>"}` | SIGTERM peer + close its Terminal tab |
+| `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab. Auto-clones the repo via `gh` if `repo_url` is set in the registry and the local path is missing. |
+| `/api/stop` | POST `{agent:"<key>"}` | SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
 
 ### Peer-to-peer example
 
