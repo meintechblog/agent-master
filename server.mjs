@@ -18,6 +18,7 @@ const REGISTRY_EXAMPLE_PATH = path.join(__dirname, "data", "registry.example.jso
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SPAWN_LOG = path.join(__dirname, "data", "spawn.log");
 const SKILLS_DIR = path.join(process.env.HOME, ".claude", "skills");
+const PLUGINS_CACHE_DIR = path.join(process.env.HOME, ".claude", "plugins", "cache");
 const SKILLS_CACHE_MS = 5 * 60 * 1000;
 
 const USAGE_CACHE_MS = 5 * 60 * 1000;
@@ -153,12 +154,61 @@ function parseFrontmatter(text) {
   return result;
 }
 
-function clusterForSkill(name) {
+function clusterForSkill(name, pluginPrefix) {
+  if (pluginPrefix === "browse") return "Browser";
+  if (pluginPrefix === "frontend-design") return "Frontend";
   if (name.startsWith("gsd-")) return "GSD";
-  if (name.startsWith("browse")) return "Browser";
-  if (name.startsWith("frontend-design")) return "Frontend";
   if (["thermomix-master", "chatgpt-image-restyle"].includes(name)) return "Workflow";
   return "Utility";
+}
+
+// Scan ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<slug>/SKILL.md
+async function scanPluginSkills() {
+  const skills = [];
+  if (!existsSync(PLUGINS_CACHE_DIR)) return skills;
+  const marketplaces = await fs.readdir(PLUGINS_CACHE_DIR, { withFileTypes: true });
+  for (const mp of marketplaces) {
+    if (!mp.isDirectory()) continue;
+    const mpPath = path.join(PLUGINS_CACHE_DIR, mp.name);
+    const plugins = await fs.readdir(mpPath, { withFileTypes: true });
+    for (const pl of plugins) {
+      if (!pl.isDirectory()) continue;
+      const plPath = path.join(mpPath, pl.name);
+      const versions = await fs.readdir(plPath, { withFileTypes: true });
+      // Pick the version dir that actually contains a skills/ subfolder.
+      for (const ver of versions) {
+        if (!ver.isDirectory()) continue;
+        const skillsDir = path.join(plPath, ver.name, "skills");
+        if (!existsSync(skillsDir)) continue;
+        const skillDirs = await fs.readdir(skillsDir, { withFileTypes: true });
+        for (const sd of skillDirs) {
+          if (!sd.isDirectory()) continue;
+          const mdPath = path.join(skillsDir, sd.name, "SKILL.md");
+          if (!existsSync(mdPath)) continue;
+          try {
+            const md = await fs.readFile(mdPath, "utf8");
+            const fm = parseFrontmatter(md) || {};
+            const baseName = fm.name || sd.name;
+            const displayName = `${pl.name}:${baseName}`;
+            skills.push({
+              name: displayName,
+              slug: sd.name,
+              plugin: pl.name,
+              marketplace: mp.name,
+              description: fm.description || "",
+              argument_hint: fm["argument-hint"] || null,
+              allowed_tools: fm["allowed-tools"] || [],
+              cluster: clusterForSkill(baseName, pl.name),
+              path: mdPath,
+            });
+          } catch (err) {
+            console.warn(`[skills] could not parse ${mdPath}:`, err.message);
+          }
+        }
+      }
+    }
+  }
+  return skills;
 }
 
 async function readSkills({ force = false } = {}) {
@@ -166,31 +216,39 @@ async function readSkills({ force = false } = {}) {
   if (!force && skillsCache.data && now - skillsCache.fetched_at < SKILLS_CACHE_MS) {
     return { ...skillsCache.data, cached: true, age_ms: now - skillsCache.fetched_at };
   }
-  if (!existsSync(SKILLS_DIR)) {
-    skillsCache = { data: { skills: [], clusters: {}, count: 0, dir: SKILLS_DIR, generated_at: new Date().toISOString() }, fetched_at: now };
-    return { ...skillsCache.data, cached: false, age_ms: 0, error: "skills_dir_missing" };
-  }
-  const entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
   const skills = [];
-  for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const skillMdPath = path.join(SKILLS_DIR, e.name, "SKILL.md");
-    if (!existsSync(skillMdPath)) continue;
-    try {
-      const md = await fs.readFile(skillMdPath, "utf8");
-      const fm = parseFrontmatter(md) || {};
-      skills.push({
-        name: fm.name || e.name,
-        slug: e.name,
-        description: fm.description || "",
-        argument_hint: fm["argument-hint"] || null,
-        allowed_tools: fm["allowed-tools"] || [],
-        cluster: clusterForSkill(fm.name || e.name),
-        path: skillMdPath,
-      });
-    } catch (err) {
-      console.warn(`[skills] could not parse ${skillMdPath}:`, err.message);
+  if (existsSync(SKILLS_DIR)) {
+    const entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const skillMdPath = path.join(SKILLS_DIR, e.name, "SKILL.md");
+      if (!existsSync(skillMdPath)) continue;
+      try {
+        const md = await fs.readFile(skillMdPath, "utf8");
+        const fm = parseFrontmatter(md) || {};
+        const baseName = fm.name || e.name;
+        skills.push({
+          name: baseName,
+          slug: e.name,
+          plugin: null,
+          marketplace: null,
+          description: fm.description || "",
+          argument_hint: fm["argument-hint"] || null,
+          allowed_tools: fm["allowed-tools"] || [],
+          cluster: clusterForSkill(baseName, null),
+          path: skillMdPath,
+        });
+      } catch (err) {
+        console.warn(`[skills] could not parse ${skillMdPath}:`, err.message);
+      }
     }
+  }
+  // Also scan installed plugins for SKILL.md files.
+  try {
+    const pluginSkills = await scanPluginSkills();
+    skills.push(...pluginSkills);
+  } catch (err) {
+    console.warn("[skills] plugin scan failed:", err.message);
   }
   skills.sort((a, b) => a.name.localeCompare(b.name));
   const clusters = {};
