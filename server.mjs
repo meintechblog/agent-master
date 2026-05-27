@@ -133,10 +133,20 @@ async function stopAgent(repoKey, registry) {
   const peer = peers.find((p) => p.cwd === agent.repo);
   if (!peer) return { not_running: true, agent: repoKey };
 
-  const ttyShort = (peer.tty || "").replace("/dev/", "");
+  const log = (msg) =>
+    fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} stop ${repoKey} ${msg}\n`).catch(() => {});
+
+  // The broker reports tty either as "ttys010" or "/dev/ttys010" depending on
+  // how the child process registered. AppleScript always returns "/dev/ttys010".
+  // Normalize both sides to a "/dev/…" string and compare.
+  const ttyRaw = peer.tty || "";
+  const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
+  await log(`begin pid=${peer.pid} tty=${ttyRaw} ttyFull=${ttyFull}`);
+
   let targetWid = null;
   let targetTab = null;
-  if (ttyShort) {
+  let findRaw = "";
+  if (ttyFull) {
     const findScript = `
       tell application "Terminal"
         set found to ""
@@ -150,7 +160,7 @@ async function stopAgent(repoKey, registry) {
             on error
               set tt to ""
             end try
-            if tt is "/dev/${ttyShort}" then
+            if tt is "${ttyFull}" then
               set found to (wid as text) & ":" & (i as text)
               exit repeat
             end if
@@ -160,42 +170,64 @@ async function stopAgent(repoKey, registry) {
         return found
       end tell
     `;
-    const result = await runOsa(findScript).catch(() => "");
-    if (result) {
-      const [w, t] = result.split(":");
+    try {
+      findRaw = await runOsa(findScript);
+    } catch (e) {
+      findRaw = `<err:${e.message}>`;
+    }
+    if (findRaw && !findRaw.startsWith("<err:")) {
+      const [w, t] = findRaw.split(":");
       targetWid = parseInt(w, 10);
       targetTab = parseInt(t, 10);
     }
   }
+  await log(`find result="${findRaw}" wid=${targetWid} tab=${targetTab}`);
 
   let signaled = false;
   if (peer.pid) {
     try {
       process.kill(peer.pid, "SIGTERM");
       signaled = true;
-    } catch {}
+    } catch (e) {
+      await log(`SIGTERM failed: ${e.message}`);
+    }
   }
+  await log(`sigterm sent=${signaled}, waiting 1500ms…`);
 
   await new Promise((r) => setTimeout(r, 1500));
+
   let tabClosed = false;
+  let closeErr = null;
   if (targetWid && targetTab) {
     const closeScript = `
       tell application "Terminal"
         try
           close tab ${targetTab} of window id ${targetWid}
-        on error
+          return "tab-closed"
+        on error tabErr
           try
             close window id ${targetWid}
+            return "window-closed: " & tabErr
+          on error winErr
+            return "both-failed: tab=" & tabErr & " win=" & winErr
           end try
         end try
       end tell
     `;
-    await runOsa(closeScript).catch(() => {});
-    tabClosed = true;
+    try {
+      const closeResult = await runOsa(closeScript);
+      tabClosed = closeResult.startsWith("tab-closed") || closeResult.startsWith("window-closed");
+      await log(`close result="${closeResult}"`);
+    } catch (e) {
+      closeErr = e.message;
+      await log(`close osascript threw: ${e.message}`);
+    }
+  } else {
+    await log(`close skipped (no target tab)`);
   }
 
-  await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} stop  ${repoKey} pid=${peer.pid} tty=${peer.tty} signaled=${signaled} tab=${tabClosed}\n`);
-  return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id };
+  await log(`done signaled=${signaled} tabClosed=${tabClosed}${closeErr ? ` closeErr=${closeErr}` : ""}`);
+  return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty: ttyRaw, ttyFull, findRaw, targetWid, targetTab, closeErr } };
 }
 
 // ── Plan-Usage (Claude Code Subscription /usage data) ───────────────────────
