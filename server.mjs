@@ -347,6 +347,17 @@ function sseSend(res, event, data) {
   }
 }
 
+function resolveLive(agent, registry, liveByCwd) {
+  const direct = liveByCwd.get(agent.repo);
+  if (direct) return direct;
+  const aliasTarget = agent.deployment?.type === "alias" ? agent.deployment.for : agent.alias_for;
+  if (aliasTarget) {
+    const target = registry.agents[aliasTarget];
+    if (target) return liveByCwd.get(target.repo);
+  }
+  return null;
+}
+
 async function broadcastStatus() {
   if (sseClients.size === 0) return;
   try {
@@ -354,7 +365,7 @@ async function broadcastStatus() {
     const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
     const agents = {};
     for (const [key, agent] of Object.entries(registry.agents)) {
-      const live = liveByCwd.get(agent.repo);
+      const live = resolveLive(agent, registry, liveByCwd);
       agents[key] = {
         ...agent,
         key,
@@ -412,7 +423,7 @@ async function handleApi(req, res, url) {
     const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
     const agents = {};
     for (const [key, agent] of Object.entries(registry.agents)) {
-      const live = liveByCwd.get(agent.repo);
+      const live = resolveLive(agent, registry, liveByCwd);
       agents[key] = {
         ...agent,
         key,

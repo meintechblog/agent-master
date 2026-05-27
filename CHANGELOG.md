@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Live countdown to plan-window reset** in the header (`in 3h 12min`) under the reset timestamp, plus an `· in Xd Yh` suffix in the side panel. Ticks every 60 s client-side.
+- **Alias-aware liveness:** if an agent's `deployment.type === "alias"` (or it has `alias_for`), it inherits the live state of its target. Example: an alias entry for an agent that is actually run under a different key now shows up as live when the target is live.
+- **Favicon** (`public/favicon.svg`) — a dark hub-network icon matching the app's dark theme and purple accent.
+
+### Changed
+
+- **Sidebar sort is now strictly alphabetical** (was: live-first, then by role, then by name). Less visual jitter when peers come and go.
+- **Sidebar removed the health-check LED.** The HTTP-ping status was visually competing with the live-dot and creating confusion ("is the agent running?"  vs. "is the service HTTP-reachable?"). Health LED now lives only in the main detail panel, with explanatory text next to it.
+- **Reset timestamp no longer prepends `(Xh Ymin)`** when same-day — that info is already shown by the new live countdown directly below.
+
 ## [0.1.0] — 2026-05-27
 
 Initial public release.

@@ -418,7 +418,7 @@ function fmtResetTime(iso) {
   const diffMin = Math.round((d - now) / 60000);
   const sameDay = d.toDateString() === now.toDateString();
   const time = d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-  if (sameDay) return `${time} (${fmtMin(diffMin)})`;
+  if (sameDay) return time;
   const day = d.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
   return `${day} ${time}`;
 }
@@ -528,24 +528,14 @@ document.addEventListener("click", (e) => {
 
 function renderTabs() {
   const tabs = document.getElementById("tabs");
-  const entries = Object.entries(state.agents).sort((a, b) => {
-    if (a[1].live !== b[1].live) return a[1].live ? -1 : 1;
-    const order = ["Hub", "Bridge", "Infra", "Domain"];
-    const ra = order.indexOf(a[1].role);
-    const rb = order.indexOf(b[1].role);
-    if (ra !== rb) return ra - rb;
-    return a[0].localeCompare(b[0]);
-  });
+  const entries = Object.entries(state.agents).sort((a, b) => a[0].localeCompare(b[0]));
   tabs.innerHTML = "";
   for (const [key, agent] of entries) {
-    const hc = healthData.checks?.[key];
-    const ledClass = hc ? hc.status : "skip";
     const btn = document.createElement("button");
     btn.className = "tab" + (active === key ? " active" : "");
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
-      <span class="health-led ${ledClass}" title="health: ${hc?.status || "n/a"}"></span>
       <span class="tab-role">${agent.role}</span>
     `;
     btn.onclick = () => { active = key; render(); };

@@ -46,25 +46,40 @@ bash ~/codex/agent-master/install.sh --uninstall
 
 ```
 ┌─ agent-master ────────────────────────────────────────────────────────────┐
-│  Sidebar          │  5h-Block 23%  $4.20   Woche 57%  $42.30              │
-│  ─────────        │  ▓░░░░                ▓▓▓▓░                          │
-│  ● demo-hub       │  reset: Mo. 01.06. 00:00                              │
-│  ● demo-domain ▶  │  in 3d 11h                                            │
-│  ○ demo-bridge    ├───────────────────────────────────────────────────────│
-│  ◌ demo-other     │  demo-domain-lxc          [● live] [Stop]             │
-│                   │  Example domain agent…                                │
-│                   │                                                       │
-│                   │  Capabilities: http-api, metrics-collection           │
-│                   │  Deployment:   lxc · proxmox-host · 10.0.0.50:80      │
-│                   │  Endpoints:    GET http://10.0.0.50/api               │
-│                   │  Depends on:   demo-hub                               │
-└───────────────────┴───────────────────────────────────────────────────────┘
-  ●  live in broker     ○  registered, not running     ◌  health-check down
+│  Sidebar             │  5h-Block 23% $4.20   Woche 57% $42.30             │
+│  ─────────           │  ▓░░░░               ▓▓▓▓░                        │
+│  ● agent-master  HUB │  reset: 18:40                                      │
+│  ● demo-domain  ▶ DOM│  in 3h 12min                                       │
+│  ○ demo-bridge   BRI ├────────────────────────────────────────────────────│
+│  ○ demo-external INF │  demo-domain-lxc          [● live] [Stop]          │
+│                      │  Example domain agent…                             │
+│                      │                                                    │
+│                      │  Capabilities: http-api, metrics-collection        │
+│                      │  Deployment:   lxc · proxmox-host · 10.0.0.50:80   │
+│                      │  Endpoints:    GET http://10.0.0.50/api            │
+│                      │  Depends on:   agent-master                        │
+│                      │  Health:       ● ok (200)                          │
+└──────────────────────┴────────────────────────────────────────────────────┘
+  ●  live in broker        ○  not running
 ```
 
-- **Sidebar:** one button per agent, sorted by live-status + role (Hub/Bridge/Infra/Domain). Coloured dot = live state, health LED = HTTP-ping status.
+- **Sidebar:** one button per agent, sorted alphabetically. Coloured dot = live state in the claude-peers broker (green = registered, grey = offline). Role label on the right (Hub/Bridge/Infra/Domain).
 - **Header:** Plan-% (the same data Claude Code's `/usage` slash command shows) combined with ccusage's API-equivalent cost, plus a live countdown until the 5h-block and weekly window reset.
-- **Main panel:** capabilities, when-to-use, deployment, owned endpoints, MQTT topics, dependencies, secrets location, live dashboards, memory references. Spawn or Stop button depending on live state.
+- **Main panel:** capabilities, when-to-use, deployment, owned endpoints, MQTT topics, dependencies, secrets location, live dashboards, memory references, plus an HTTP health-check LED (separate from the broker live-state, since a service can be HTTP-reachable without a claude-peers session attached). Spawn or Stop button depending on live state.
+
+### Refresh cadence
+
+| What | How often | Mechanism |
+|---|---|---|
+| Per-agent live state (broker peers) | every **3 s** | SSE `status` event |
+| Plan-% utilization + reset countdown | every **5 min** | SSE `plan_usage` event (5 min server cache) |
+| ccusage cost overlay | every **5 min** | SSE `usage` event (5 min server cache) |
+| Health-check LEDs (HTTP pings) | **60 s cache**, refreshed on demand | server-side, called when the UI requests `/api/health` |
+| Countdown re-render | every **60 s** client tick | so "in 3h 12min" stays correct without an SSE event |
+
+When the browser tab is hidden, the client closes the SSE connection and the server stops doing broadcast work entirely — no broker polls, no `ccusage` spawn, no keychain read. Reopening the tab reconnects automatically.
+
+The HTTP API (`/api/status`, `/api/spawn`, `/api/stop`, …) is **always live** regardless of whether a browser is connected, since the server runs as a LaunchAgent. Other peers can `curl` it any time.
 
 ## How it works
 
