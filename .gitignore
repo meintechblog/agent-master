@@ -4,6 +4,7 @@ data/spawn.log
 data/spawned-windows.json
 data/soft-stop-state.json
 data/briefed-peers.json
+data/.influx-token
 
 # Local user registry — derived from data/registry.example.json on first install.
 # Each user maintains their own.

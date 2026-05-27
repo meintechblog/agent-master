@@ -28,6 +28,15 @@ const BRIEFING_MD_PATH = path.join(__dirname, "data", "peer-briefing.md");
 const BRIEFED_PEERS_PATH = path.join(__dirname, "data", "briefed-peers.json");
 const BRIEFING_POLL_MS = 30 * 1000;
 
+// --- Skill-usage logging to InfluxDB ---
+// Spawns scripts/scan-skill-usage.mjs with --since-ms so each tick only
+// re-scans recently-modified transcripts. Idempotent at the InfluxDB level
+// (timestamp+tags), so the lookback can comfortably overlap the interval.
+const SKILL_USAGE_SCRIPT = path.join(__dirname, "scripts", "scan-skill-usage.mjs");
+const SKILL_USAGE_TOKEN_FILE = path.join(__dirname, "data", ".influx-token");
+const SKILL_USAGE_POLL_MS = 5 * 60 * 1000;
+const SKILL_USAGE_LOOKBACK_MS = 6 * 60 * 1000;
+
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 const HEALTH_CACHE_MS = 60 * 1000;
 const BROADCAST_MS = 3000;
@@ -469,6 +478,65 @@ async function startBriefingLoop() {
   await loadBriefedPeers();
   await briefingTick();
   briefingTimer = setInterval(briefingTick, BRIEFING_POLL_MS);
+}
+
+// === Skill-usage InfluxDB shipping ===
+//
+// Resolves the influx token from env or data/.influx-token (gitignored). If
+// neither is present, the loop logs once and stays dormant — no crash.
+
+let skillUsageState = { last_run_at: null, last_summary: null, last_error: null, token_present: false };
+
+async function resolveInfluxToken() {
+  if (process.env.INFLUX_TOKEN) return process.env.INFLUX_TOKEN.trim();
+  if (existsSync(SKILL_USAGE_TOKEN_FILE)) {
+    return (await fs.readFile(SKILL_USAGE_TOKEN_FILE, "utf8")).trim();
+  }
+  return null;
+}
+
+async function skillUsageTick() {
+  const token = await resolveInfluxToken();
+  if (!token) {
+    if (skillUsageState.token_present !== false || skillUsageState.last_run_at == null) {
+      console.warn("[skill-usage] no INFLUX_TOKEN (env or data/.influx-token) — loop dormant");
+    }
+    skillUsageState = { ...skillUsageState, token_present: false, last_run_at: new Date().toISOString() };
+    return;
+  }
+  skillUsageState.token_present = true;
+  try {
+    const result = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [SKILL_USAGE_SCRIPT, "--since-ms", String(SKILL_USAGE_LOOKBACK_MS)], {
+        env: { ...process.env, INFLUX_TOKEN: token },
+      });
+      let out = "";
+      child.stdout.on("data", (d) => (out += d));
+      child.stderr.on("data", (d) => (out += d));
+      child.on("close", (code) => resolve({ code, out }));
+    });
+    const summary = (result.out.match(/\[scan\] wrote .*/g) || []).pop() || "(no points)";
+    if (result.code !== 0) {
+      console.warn(`[skill-usage] scan exit ${result.code}: ${result.out.slice(-300).trim()}`);
+      skillUsageState.last_error = `exit ${result.code}: ${result.out.slice(-200)}`;
+    } else {
+      console.log(`[skill-usage] ${summary}`);
+      skillUsageState.last_error = null;
+    }
+    skillUsageState.last_summary = summary;
+    skillUsageState.last_run_at = new Date().toISOString();
+  } catch (err) {
+    console.warn("[skill-usage] tick failed:", err.message);
+    skillUsageState.last_error = err.message;
+    skillUsageState.last_run_at = new Date().toISOString();
+  }
+}
+
+let skillUsageTimer = null;
+async function startSkillUsageLoop() {
+  if (skillUsageTimer) return;
+  await skillUsageTick();
+  skillUsageTimer = setInterval(skillUsageTick, SKILL_USAGE_POLL_MS);
 }
 
 async function fetchPeers() {
@@ -1062,6 +1130,8 @@ async function handleApi(req, res, url) {
           query: { path: "absolute path returned by /api/skills (must be under ~/.claude/skills/ or ~/.claude/plugins/cache/)" } },
         { method: "GET",  path: "/api/briefing",         purpose: "current peer-briefing text + history of who has been briefed" },
         { method: "POST", path: "/api/briefing/rebrief", purpose: "re-send briefing to one peer (or all). body: { peer_id } | { cwd } | { all: true }" },
+        { method: "GET",  path: "/api/skill-usage",      purpose: "loop state + InfluxDB target. Scans transcripts every 5 min, ships Skill tool_use events.",
+          query: { trigger: "1 to fire the scan once now (still respects --since-ms overlap)" } },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -1070,6 +1140,21 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skills") {
     const force = url.searchParams.get("refresh") === "1";
     return send(200, await readSkills({ force }));
+  }
+
+  // Skill-usage loop status. `?trigger=1` forces an immediate scan and waits
+  // for it (useful after manual transcript activity, no need to wait 5 min).
+  if (req.method === "GET" && url.pathname === "/api/skill-usage") {
+    if (url.searchParams.get("trigger") === "1") await skillUsageTick();
+    return send(200, {
+      script: SKILL_USAGE_SCRIPT,
+      influx_url: process.env.INFLUX_URL || "http://172.25.0.111:8086",
+      influx_org: process.env.INFLUX_ORG || "meintechblog",
+      influx_bucket: process.env.INFLUX_BUCKET || "default",
+      poll_interval_ms: SKILL_USAGE_POLL_MS,
+      lookback_ms: SKILL_USAGE_LOOKBACK_MS,
+      state: skillUsageState,
+    });
   }
 
   // Briefing inspector: current MD content + log of who was briefed when.
@@ -1332,4 +1417,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[agent-master] broker: ${BROKER_URL}`);
   console.log(`[agent-master] registry: ${REGISTRY_PATH}`);
   startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
+  startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
 });
