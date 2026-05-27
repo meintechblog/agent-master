@@ -33,9 +33,16 @@ const BRIEFING_POLL_MS = 30 * 1000;
 // re-scans recently-modified transcripts. Idempotent at the InfluxDB level
 // (timestamp+tags), so the lookback can comfortably overlap the interval.
 const SKILL_USAGE_SCRIPT = path.join(__dirname, "scripts", "scan-skill-usage.mjs");
-const SKILL_USAGE_TOKEN_FILE = path.join(__dirname, "data", ".influx-token");
+const SKILL_USAGE_LEGACY_TOKEN_FILE = path.join(__dirname, "data", ".influx-token");
 const SKILL_USAGE_POLL_MS = 5 * 60 * 1000;
 const SKILL_USAGE_LOOKBACK_MS = 6 * 60 * 1000;
+
+// --- Sources (InfluxDB and future others) ---
+// data/sources.json holds the user-managed list of data sources. Schema:
+//   { sources: [ { id, name, type, url, org, bucket, token, default, created_at } ] }
+// The "default" flag picks which source the skill-usage loop & aggregation
+// API talk to. Token never leaves the server — list/read endpoints redact it.
+const SOURCES_PATH = path.join(__dirname, "data", "sources.json");
 
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 const HEALTH_CACHE_MS = 60 * 1000;
@@ -480,35 +487,109 @@ async function startBriefingLoop() {
   briefingTimer = setInterval(briefingTick, BRIEFING_POLL_MS);
 }
 
+// === Sources persistence ===
+//
+// One-time migration: if data/sources.json doesn't exist but the legacy
+// data/.influx-token does, wrap the legacy config into a single default
+// source so the user keeps logging without manual setup.
+
+let sourcesCache = null;
+
+function genSourceId() {
+  return "src_" + Math.random().toString(36).slice(2, 10);
+}
+
+async function loadSources() {
+  if (sourcesCache) return sourcesCache;
+  if (existsSync(SOURCES_PATH)) {
+    try {
+      sourcesCache = JSON.parse(await fs.readFile(SOURCES_PATH, "utf8"));
+    } catch (err) {
+      console.warn("[sources] could not parse sources.json:", err.message);
+      sourcesCache = { sources: [] };
+    }
+  } else if (existsSync(SKILL_USAGE_LEGACY_TOKEN_FILE)) {
+    // Migrate legacy single-token setup.
+    const token = (await fs.readFile(SKILL_USAGE_LEGACY_TOKEN_FILE, "utf8")).trim();
+    sourcesCache = {
+      sources: [{
+        id: genSourceId(),
+        name: "Central InfluxDB (172.25.0.111)",
+        type: "influxdb2",
+        url: process.env.INFLUX_URL || "http://172.25.0.111:8086",
+        org: process.env.INFLUX_ORG || "meintechblog",
+        bucket: process.env.INFLUX_BUCKET || "default",
+        token,
+        default: true,
+        created_at: new Date().toISOString(),
+      }],
+    };
+    await saveSources();
+    console.log("[sources] migrated data/.influx-token into data/sources.json");
+  } else {
+    sourcesCache = { sources: [] };
+  }
+  return sourcesCache;
+}
+
+async function saveSources() {
+  if (!sourcesCache) sourcesCache = { sources: [] };
+  await fs.writeFile(SOURCES_PATH, JSON.stringify(sourcesCache, null, 2), { mode: 0o600 });
+}
+
+async function getDefaultSource(type = "influxdb2") {
+  const cfg = await loadSources();
+  const matches = cfg.sources.filter((s) => s.type === type);
+  return matches.find((s) => s.default) || matches[0] || null;
+}
+
+function redactSource(s) {
+  if (!s) return null;
+  const { token, ...rest } = s;
+  return { ...rest, has_token: !!token, token_preview: token ? token.slice(0, 6) + "…" + token.slice(-4) : null };
+}
+
 // === Skill-usage InfluxDB shipping ===
 //
-// Resolves the influx token from env or data/.influx-token (gitignored). If
-// neither is present, the loop logs once and stays dormant — no crash.
+// Resolves the influx token from the default influxdb2 source in
+// sources.json. If none is configured, the loop logs once and stays
+// dormant — no crash. Env vars INFLUX_TOKEN/_URL/_ORG/_BUCKET still
+// override for ad-hoc / CI use.
 
 let skillUsageState = { last_run_at: null, last_summary: null, last_error: null, token_present: false };
 
 async function resolveInfluxToken() {
   if (process.env.INFLUX_TOKEN) return process.env.INFLUX_TOKEN.trim();
-  if (existsSync(SKILL_USAGE_TOKEN_FILE)) {
-    return (await fs.readFile(SKILL_USAGE_TOKEN_FILE, "utf8")).trim();
-  }
-  return null;
+  const src = await getDefaultSource("influxdb2");
+  return src?.token || null;
+}
+
+async function resolveInfluxTarget() {
+  const src = await getDefaultSource("influxdb2");
+  return {
+    url:    process.env.INFLUX_URL    || src?.url    || "http://172.25.0.111:8086",
+    org:    process.env.INFLUX_ORG    || src?.org    || "meintechblog",
+    bucket: process.env.INFLUX_BUCKET || src?.bucket || "default",
+    source_id: src?.id || null,
+    source_name: src?.name || null,
+  };
 }
 
 async function skillUsageTick() {
   const token = await resolveInfluxToken();
   if (!token) {
     if (skillUsageState.token_present !== false || skillUsageState.last_run_at == null) {
-      console.warn("[skill-usage] no INFLUX_TOKEN (env or data/.influx-token) — loop dormant");
+      console.warn("[skill-usage] no default InfluxDB source configured — loop dormant");
     }
     skillUsageState = { ...skillUsageState, token_present: false, last_run_at: new Date().toISOString() };
     return;
   }
   skillUsageState.token_present = true;
+  const target = await resolveInfluxTarget();
   try {
     const result = await new Promise((resolve) => {
       const child = spawn(process.execPath, [SKILL_USAGE_SCRIPT, "--since-ms", String(SKILL_USAGE_LOOKBACK_MS)], {
-        env: { ...process.env, INFLUX_TOKEN: token },
+        env: { ...process.env, INFLUX_TOKEN: token, INFLUX_URL: target.url, INFLUX_ORG: target.org, INFLUX_BUCKET: target.bucket },
       });
       let out = "";
       child.stdout.on("data", (d) => (out += d));
@@ -537,6 +618,108 @@ async function startSkillUsageLoop() {
   if (skillUsageTimer) return;
   await skillUsageTick();
   skillUsageTimer = setInterval(skillUsageTick, SKILL_USAGE_POLL_MS);
+}
+
+// === InfluxDB query helpers ===
+//
+// queryFlux() runs an arbitrary Flux statement against the default source
+// (env-or-file token; multi-source comes in the sources.json refactor) and
+// returns the result rows as plain objects. Throws on HTTP error / missing
+// token so callers can decide whether to fall back to an empty payload.
+
+function parseFluxCsv(text) {
+  // Flux returns annotated CSV: lines starting with '#' are annotations
+  // (datatype, group, default). Each non-empty result table begins with a
+  // header row immediately after the annotations. For our simple queries we
+  // can flatten all data rows under a single header (they share one shape).
+  // Important: InfluxDB uses CRLF line endings — strip trailing \r before
+  // splitting columns, else every key has a hidden \r suffix.
+  const lines = text.split("\n");
+  let headers = null;
+  const out = [];
+  for (const rawLine of lines) {
+    const raw = rawLine.replace(/\r$/, "");
+    if (!raw) continue;
+    if (raw.startsWith("#")) { headers = null; continue; } // reset on table boundary
+    const cells = raw.split(",");
+    if (!headers) { headers = cells; continue; }
+    out.push(Object.fromEntries(headers.map((h, i) => [h, cells[i]])));
+  }
+  return out;
+}
+
+async function queryFlux(flux) {
+  const token = await resolveInfluxToken();
+  if (!token) throw new Error("no_influx_token");
+  const target = await resolveInfluxTarget();
+  const url = `${target.url}/api/v2/query?org=${encodeURIComponent(target.org)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Token ${token}`,
+      "Content-Type": "application/vnd.flux",
+      "Accept": "application/csv",
+    },
+    body: flux,
+  });
+  if (!r.ok) throw new Error(`influx query ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return parseFluxCsv(await r.text());
+}
+
+// Aggregate per-skill invocation counts over the last 365 days. Returns a
+// map keyed by skill name with total/d7/d30/last_used fields plus a few
+// global headline numbers for the stats strip. Cached for 60s to keep the
+// /api/skill-usage/aggregated endpoint cheap.
+const SKILL_USAGE_AGG_CACHE_MS = 60 * 1000;
+let skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+
+async function getSkillUsageAggregated({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && skillUsageAggCache.data && now - skillUsageAggCache.fetched_at < SKILL_USAGE_AGG_CACHE_MS) {
+    return { ...skillUsageAggCache.data, cached: true, age_ms: now - skillUsageAggCache.fetched_at };
+  }
+  const target = await resolveInfluxTarget();
+  const flux = `from(bucket:"${target.bucket}")
+  |> range(start:-365d)
+  |> filter(fn:(r)=>r._measurement=="skill_invocations")
+  |> keep(columns:["_time","skill"])`;
+  let rows;
+  try {
+    rows = await queryFlux(flux);
+  } catch (err) {
+    skillUsageAggCache = { data: null, fetched_at: now, error: err.message };
+    return { skills: {}, totals: { invocations: 0, unique_skills: 0, d7: 0, d30: 0 }, error: err.message, cached: false };
+  }
+  const SEVEN_D = 7 * 86400 * 1000;
+  const THIRTY_D = 30 * 86400 * 1000;
+  const skills = {};
+  let totalD7 = 0;
+  let totalD30 = 0;
+  for (const r of rows) {
+    const sk = r.skill;
+    const t = r._time ? new Date(r._time).getTime() : null;
+    if (!sk || !t || Number.isNaN(t)) continue;
+    if (sk === "__smoketest") continue;
+    const e = (skills[sk] = skills[sk] || { total: 0, d7: 0, d30: 0, last_used: null });
+    e.total++;
+    if (now - t < SEVEN_D)  { e.d7++;  totalD7++;  }
+    if (now - t < THIRTY_D) { e.d30++; totalD30++; }
+    if (!e.last_used || t > new Date(e.last_used).getTime()) e.last_used = r._time;
+  }
+  const topSkill = Object.entries(skills).sort((a, b) => b[1].total - a[1].total)[0];
+  const data = {
+    skills,
+    totals: {
+      invocations: rows.filter((r) => r.skill && r.skill !== "__smoketest").length,
+      unique_skills: Object.keys(skills).length,
+      d7: totalD7,
+      d30: totalD30,
+      top_skill: topSkill ? { name: topSkill[0], count: topSkill[1].total } : null,
+    },
+    generated_at: new Date().toISOString(),
+  };
+  skillUsageAggCache = { data, fetched_at: now, error: null };
+  return { ...data, cached: false, age_ms: 0 };
 }
 
 async function fetchPeers() {
@@ -1132,6 +1315,14 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/briefing/rebrief", purpose: "re-send briefing to one peer (or all). body: { peer_id } | { cwd } | { all: true }" },
         { method: "GET",  path: "/api/skill-usage",      purpose: "loop state + InfluxDB target. Scans transcripts every 5 min, ships Skill tool_use events.",
           query: { trigger: "1 to fire the scan once now (still respects --since-ms overlap)" } },
+        { method: "GET",  path: "/api/skill-usage/aggregated", purpose: "per-skill counts (total/7d/30d/last_used) + headline totals — feeds the Skills-tab heatmap. Cached 60s.",
+          query: { refresh: "1 to bypass the 60s cache" } },
+        { method: "GET",    path: "/api/sources",           purpose: "list configured data sources (InfluxDB etc.); tokens redacted" },
+        { method: "POST",   path: "/api/sources",           purpose: "create source. body: { name, type:'influxdb2', url, org, bucket, token, default? }" },
+        { method: "PATCH",  path: "/api/sources/:id",       purpose: "update source. body subset of POST fields; omit token to keep current" },
+        { method: "DELETE", path: "/api/sources/:id",       purpose: "delete source. cannot delete the default one if other sources exist." },
+        { method: "POST",   path: "/api/sources/:id/set-default", purpose: "promote one source to default for its type" },
+        { method: "POST",   path: "/api/sources/:id/test",  purpose: "ping the source's /health endpoint. Returns {ok, status, message}" },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -1140,6 +1331,128 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skills") {
     const force = url.searchParams.get("refresh") === "1";
     return send(200, await readSkills({ force }));
+  }
+
+  // Aggregated skill usage for the Skills-tab heatmap. Reads the last 365d
+  // from InfluxDB, returns per-skill counts + totals. Cached 60s.
+  if (req.method === "GET" && url.pathname === "/api/skill-usage/aggregated") {
+    const force = url.searchParams.get("refresh") === "1";
+    return send(200, await getSkillUsageAggregated({ force }));
+  }
+
+  // === Sources CRUD ===
+  // Inline body-read helper (the file-scope readJson is declared later).
+  const readBody = async () => {
+    let raw = "";
+    for await (const c of req) raw += c;
+    try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
+  };
+
+  if (req.method === "GET" && url.pathname === "/api/sources") {
+    const cfg = await loadSources();
+    return send(200, { sources: cfg.sources.map(redactSource) });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/sources") {
+    const body = await readBody();
+    if (!body) return send(400, { error: "invalid_json" });
+    const { name, type = "influxdb2", url: srcUrl, org, bucket, token } = body;
+    if (!name || !srcUrl || !token) return send(400, { error: "missing_fields", required: ["name","url","token"] });
+    const cfg = await loadSources();
+    const isFirstOfType = !cfg.sources.some((s) => s.type === type);
+    const entry = {
+      id: genSourceId(),
+      name: String(name),
+      type: String(type),
+      url: String(srcUrl).replace(/\/+$/, ""),
+      org: String(org || ""),
+      bucket: String(bucket || ""),
+      token: String(token),
+      default: !!body.default || isFirstOfType,
+      created_at: new Date().toISOString(),
+    };
+    if (entry.default) {
+      for (const s of cfg.sources) if (s.type === type) s.default = false;
+    }
+    cfg.sources.push(entry);
+    await saveSources();
+    // Bust caches that depend on the source.
+    skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+    return send(201, { source: redactSource(entry) });
+  }
+
+  // /api/sources/:id and sub-actions
+  const sourceMatch = url.pathname.match(/^\/api\/sources\/([a-zA-Z0-9_]+)(?:\/(set-default|test))?$/);
+  if (sourceMatch) {
+    const id = sourceMatch[1];
+    const action = sourceMatch[2];
+    const cfg = await loadSources();
+    const idx = cfg.sources.findIndex((s) => s.id === id);
+    if (idx < 0) return send(404, { error: "unknown_source", id });
+    const src = cfg.sources[idx];
+
+    if (req.method === "PATCH" && !action) {
+      const body = await readBody();
+      if (!body) return send(400, { error: "invalid_json" });
+      for (const k of ["name","url","org","bucket"]) {
+        if (k in body && body[k] != null) src[k] = String(body[k]);
+      }
+      if (body.url) src.url = src.url.replace(/\/+$/, "");
+      if (typeof body.token === "string" && body.token.trim()) src.token = body.token.trim();
+      if (body.default === true) {
+        for (const s of cfg.sources) if (s.type === src.type) s.default = (s.id === id);
+      }
+      await saveSources();
+      skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      return send(200, { source: redactSource(src) });
+    }
+
+    if (req.method === "DELETE" && !action) {
+      const sameType = cfg.sources.filter((s) => s.type === src.type);
+      if (src.default && sameType.length > 1) {
+        return send(400, { error: "cannot_delete_default", hint: "promote another source first via POST /api/sources/:id/set-default" });
+      }
+      cfg.sources.splice(idx, 1);
+      // If we removed the only source of its type, nothing to repromote.
+      // If we removed a non-default and other sources exist, default stays.
+      await saveSources();
+      skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      return send(200, { deleted: id });
+    }
+
+    if (req.method === "POST" && action === "set-default") {
+      for (const s of cfg.sources) if (s.type === src.type) s.default = (s.id === id);
+      await saveSources();
+      skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      return send(200, { source: redactSource(src) });
+    }
+
+    if (req.method === "POST" && action === "test") {
+      // InfluxDB v2 health endpoint is unauthenticated, so a 200 means the
+      // host is up. We also probe a tokenized /api/v2/buckets/:bucket call
+      // to confirm the token + bucket are valid.
+      const r1 = await fetch(`${src.url}/health`).catch((e) => ({ ok: false, status: 0, errMsg: e.message }));
+      const healthOk = r1.ok;
+      let bucketOk = null;
+      let bucketMsg = null;
+      if (src.type === "influxdb2" && src.bucket) {
+        try {
+          const r2 = await fetch(`${src.url}/api/v2/buckets?name=${encodeURIComponent(src.bucket)}&org=${encodeURIComponent(src.org)}`, {
+            headers: { "Authorization": `Token ${src.token}` },
+          });
+          bucketOk = r2.ok;
+          if (!r2.ok) bucketMsg = `HTTP ${r2.status}: ${(await r2.text()).slice(0, 140)}`;
+        } catch (e) {
+          bucketOk = false;
+          bucketMsg = e.message;
+        }
+      }
+      return send(200, {
+        ok: healthOk && (bucketOk === null || bucketOk),
+        health: { ok: healthOk, status: r1.status || 0, error: r1.errMsg || null },
+        bucket: { ok: bucketOk, error: bucketMsg },
+      });
+    }
   }
 
   // Skill-usage loop status. `?trigger=1` forces an immediate scan and waits
