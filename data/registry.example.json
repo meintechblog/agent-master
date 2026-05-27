@@ -1,0 +1,89 @@
+{
+  "_meta": {
+    "version": 2,
+    "updated_at": "2026-05-27T00:00:00Z",
+    "maintained_by": "you",
+    "spawn_command": "claudepeers",
+    "spawn_pattern": "AppleScript Cmd+T new tab → claudepeers in repo dir → AppleScript Enter to dismiss dev-channel dialog",
+    "doc_ref": "docs/REGISTRY.md",
+    "schema_doc": "See docs/REGISTRY.md for field reference. Copy this file to data/registry.json and edit to register your own agents."
+  },
+  "agents": {
+    "demo-hub": {
+      "repo": "/Users/you/code/demo-hub",
+      "role": "Hub",
+      "description": "Example Hub agent — routes messages between domain agents and orchestrates spawns.",
+      "capabilities": ["routing", "orchestration", "registry-maintenance"],
+      "when_to_use": ["Cross-agent question", "Spawn coordination", "Overview of running sessions"],
+      "deployment": { "type": "claude-code-session", "host": "Mac (local session)" },
+      "owned_endpoints": [],
+      "mqtt_topics": { "publishes": [], "subscribes": [] },
+      "depends_on": ["claude-peers-broker"],
+      "secrets_at": null,
+      "repo_url": null,
+      "health_check": { "url": "http://localhost:7899/list-peers", "method": "POST", "expected_status": 200 },
+      "memory_refs": [],
+      "live_dashboards": [],
+      "tags": ["orchestrator", "demo"],
+      "color": "#ff6b6b"
+    },
+    "demo-domain-lxc": {
+      "repo": "/Users/you/code/demo-domain-lxc",
+      "role": "Domain",
+      "description": "Example domain agent deployed to an LXC container on a Proxmox host.",
+      "capabilities": ["http-api", "metrics-collection"],
+      "when_to_use": ["Domain-specific question", "API integration tasks"],
+      "deployment": { "type": "lxc", "host": "proxmox-host (10.0.0.2)", "lxc_id": 100, "ip": "10.0.0.50", "port": 80, "service_name": "demo-domain" },
+      "owned_endpoints": [
+        { "method": "GET", "path": "http://10.0.0.50/api", "purpose": "Domain API" }
+      ],
+      "mqtt_topics": { "publishes": ["demo/metrics/*"], "subscribes": [] },
+      "depends_on": ["demo-hub"],
+      "secrets_at": "/path/to/host-local/secrets (gitignored)",
+      "repo_url": "https://github.com/your-org/demo-domain-lxc",
+      "health_check": { "url": "http://10.0.0.50/api", "method": "GET", "expected_status": 200 },
+      "memory_refs": [],
+      "live_dashboards": ["http://10.0.0.50"],
+      "tags": ["demo", "lxc", "domain"],
+      "color": "#6c5ce7"
+    },
+    "demo-bridge-launchd": {
+      "repo": "/Users/you/code/demo-bridge",
+      "role": "Bridge",
+      "description": "Example bridge agent — runs locally as a macOS LaunchAgent. Bridges an external system to claude-peers.",
+      "capabilities": ["external-bridge"],
+      "when_to_use": ["External system messages need to reach a peer"],
+      "deployment": { "type": "launchd-agent", "host": "Mac", "service_name": "com.example.demo-bridge", "plist": "~/Library/LaunchAgents/com.example.demo-bridge.plist" },
+      "owned_endpoints": [],
+      "mqtt_topics": { "publishes": [], "subscribes": [] },
+      "depends_on": ["demo-hub"],
+      "secrets_at": "~/code/demo-bridge/data/auth/",
+      "repo_url": null,
+      "health_check": null,
+      "memory_refs": [],
+      "live_dashboards": [],
+      "tags": ["demo", "bridge", "launchagent"],
+      "color": "#00b894"
+    },
+    "demo-external": {
+      "repo": "/Users/you/code/demo-external",
+      "role": "Infra",
+      "description": "Example external infrastructure (NAS, router, monitoring host, …) — toolkit repo only, no live session.",
+      "capabilities": ["backup", "monitoring"],
+      "when_to_use": ["External infrastructure question"],
+      "deployment": { "type": "external", "host": "nas-host", "ip": "10.0.0.9", "port": 8080 },
+      "owned_endpoints": [
+        { "method": "GET", "path": "https://10.0.0.9:8080", "purpose": "Web UI" }
+      ],
+      "mqtt_topics": { "publishes": [], "subscribes": [] },
+      "depends_on": [],
+      "secrets_at": null,
+      "repo_url": null,
+      "health_check": { "url": "https://10.0.0.9:8080", "method": "GET", "expected_status": 200, "tls_insecure": true },
+      "memory_refs": [],
+      "live_dashboards": ["https://10.0.0.9:8080"],
+      "tags": ["demo", "external"],
+      "color": "#fdcb6e"
+    }
+  }
+}

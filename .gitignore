@@ -1,0 +1,17 @@
+# Runtime state
+data/*.log
+data/spawn.log
+
+# Local user registry — derived from data/registry.example.json on first install.
+# Each user maintains their own.
+data/registry.json
+
+# Local artifacts
+node_modules/
+.DS_Store
+*.bak
+*.bak.*
+
+# Local plist patches (installer regenerates per machine)
+launchd/*.local.plist
+.planning/
