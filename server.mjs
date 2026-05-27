@@ -35,6 +35,13 @@ const sseClients = new Set();
 let usageCache = { data: null, fetched_at: 0 };
 let healthCache = { data: null, fetched_at: 0 };
 
+// Maps repoKey → window-id from the spawn AppleScript. Needed because the
+// claudepeers expect-wrapper introduces a second PTY between the Terminal
+// tab and the claude process: the tab's tty differs from peer.tty in the
+// broker, so we can't tty-match anymore. We trust the window-id we captured
+// at spawn time instead.
+const spawnedWindows = new Map();
+
 async function readRegistry() {
   const target = existsSync(REGISTRY_PATH) ? REGISTRY_PATH : REGISTRY_EXAMPLE_PATH;
   return JSON.parse(await fs.readFile(target, "utf8"));
@@ -117,6 +124,7 @@ async function spawnAgent(repoKey, registry) {
     end tell
   `;
   const wid = parseInt(await runOsa(script), 10);
+  if (Number.isFinite(wid)) spawnedWindows.set(repoKey, wid);
 
   const peer = await waitForPeerRegistration(cwd);
   await fs.appendFile(
@@ -136,17 +144,22 @@ async function stopAgent(repoKey, registry) {
   const log = (msg) =>
     fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} stop ${repoKey} ${msg}\n`).catch(() => {});
 
-  // The broker reports tty either as "ttys010" or "/dev/ttys010" depending on
-  // how the child process registered. AppleScript always returns "/dev/ttys010".
-  // Normalize both sides to a "/dev/…" string and compare.
+  // Primary path: use the window-id we captured when we spawned the agent.
+  // The claudepeers expect-wrapper makes broker.tty ≠ Terminal-tab.tty (PTY
+  // indirection), so tty-matching alone is unreliable for spawn-API-launched
+  // sessions.
   const ttyRaw = peer.tty || "";
   const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
-  await log(`begin pid=${peer.pid} tty=${ttyRaw} ttyFull=${ttyFull}`);
+  let targetWid = spawnedWindows.get(repoKey) || null;
+  let targetTab = targetWid ? 1 : null; // We always Cmd+T into a new window/tab → tab index 1.
+  let findRaw = targetWid ? "(from-spawn-map)" : "";
+  await log(`begin pid=${peer.pid} tty=${ttyRaw} ttyFull=${ttyFull} mappedWid=${targetWid || "none"}`);
 
-  let targetWid = null;
-  let targetTab = null;
-  let findRaw = "";
-  if (ttyFull) {
+  // Fallback path: session wasn't started via /api/spawn (user opened a Terminal
+  // tab manually and ran claudepeers there) → no entry in spawnedWindows.
+  // Try to match by tty. Works for legacy sessions started before the expect
+  // wrapper existed (where claude was the only PTY).
+  if (!targetWid && ttyFull) {
     const findScript = `
       tell application "Terminal"
         set found to ""
@@ -181,7 +194,7 @@ async function stopAgent(repoKey, registry) {
       targetTab = parseInt(t, 10);
     }
   }
-  await log(`find result="${findRaw}" wid=${targetWid} tab=${targetTab}`);
+  await log(`lookup result="${findRaw}" wid=${targetWid} tab=${targetTab}`);
 
   let signaled = false;
   if (peer.pid) {
@@ -227,6 +240,7 @@ async function stopAgent(repoKey, registry) {
   }
 
   await log(`done signaled=${signaled} tabClosed=${tabClosed}${closeErr ? ` closeErr=${closeErr}` : ""}`);
+  if (tabClosed) spawnedWindows.delete(repoKey);
   return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty: ttyRaw, ttyFull, findRaw, targetWid, targetTab, closeErr } };
 }
 
