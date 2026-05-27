@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Alias-aware liveness:** if an agent's `deployment.type === "alias"` (or it has `alias_for`), it inherits the live state of its target. Example: an alias entry for an agent that is actually run under a different key now shows up as live when the target is live.
 - **Favicon** (`public/favicon.svg`) — a dark hub-network icon matching the app's dark theme and purple accent.
 
+### Fixed
+
+- **`claudepeers` wrapper now actually dismisses the prompt.** First version anchored on the string `Enter to confirm`, which doesn't match because Claude's TUI fragments that phrase across the byte stream with ANSI cursor-positioning escapes (`Enter[9Gto[12Gconfirm`). Switched the anchor to `cancel` (a contiguous 6-byte token from "Esc to cancel" at the end of the prompt) plus a 5 s timeout fallback that sends Enter anyway. Result: dismissal works reliably.
+
 ### Changed
 
 - **Spawn pipeline overhauled (end-to-end fix for the "12 s dialog wait" problem).** The old approach was: launch claude, sleep 12 s, then send `key code 36` via osascript to the captured window-id to dismiss the dev-channel prompt. That was slow (12 s overhead per spawn), brittle (a foreground-app change could send the Enter to the wrong window — the bug behind "spawn just hangs sometimes"), and visually noisy. The expect-wrapper now handles dismissal inside the spawned process itself; the server just polls for broker registration. Net: spawns return in 3–6 s typical instead of 12 s+.

@@ -130,18 +130,24 @@ cat > "$CLAUDEPEERS_BIN" <<'WRAPPER'
 # "I am using this for local development" confirmation dialog.
 #
 # Wraps: claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers
-# Sends Enter at the trust prompt, then `interact` hands the full TTY to Claude.
-# All extra CLI args are forwarded (e.g. `claudepeers --resume`).
+# Forwards extra CLI args (e.g. `claudepeers --resume`).
+#
+# Pattern anchor: we match on "cancel" (from "Esc to cancel" at the end of the
+# prompt). This is a single contiguous 6-byte token that survives the TUI's
+# ANSI cursor-positioning codes that fragment longer phrases like
+# "Enter to confirm" across the byte stream. If the anchor doesn't appear
+# within 5 s (UI changed, Claude version dropped the prompt, …), we send
+# Enter anyway — harmless inside the regular Claude prompt.
 
-set timeout 30
+set timeout 5
 set args $argv
 
 spawn claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers {*}$args
 
 expect {
-    "Enter to confirm" { send "\r" }
-    timeout            { }
-    eof                { exit 0 }
+    "cancel" { send "\r" }
+    timeout  { send "\r" }
+    eof      { exit 0 }
 }
 
 interact
