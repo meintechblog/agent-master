@@ -21,6 +21,13 @@ const SKILLS_DIR = path.join(process.env.HOME, ".claude", "skills");
 const PLUGINS_CACHE_DIR = path.join(process.env.HOME, ".claude", "plugins", "cache");
 const SKILLS_CACHE_MS = 5 * 60 * 1000;
 
+// --- New-peer briefing ---
+// Path of THIS repo, so the briefing loop can skip Hulki's own session.
+const SELF_CWD = __dirname;
+const BRIEFING_MD_PATH = path.join(__dirname, "data", "peer-briefing.md");
+const BRIEFED_PEERS_PATH = path.join(__dirname, "data", "briefed-peers.json");
+const BRIEFING_POLL_MS = 30 * 1000;
+
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 const HEALTH_CACHE_MS = 60 * 1000;
 const BROADCAST_MS = 3000;
@@ -383,6 +390,85 @@ async function sendChannelMessage(toPeerId, text) {
 async function readRegistry() {
   const target = existsSync(REGISTRY_PATH) ? REGISTRY_PATH : REGISTRY_EXAMPLE_PATH;
   return JSON.parse(await fs.readFile(target, "utf8"));
+}
+
+// === New-peer briefing ===
+//
+// Background loop: every BRIEFING_POLL_MS, fetch the peer list and send a
+// one-time welcome briefing to any peer_id we haven't seen before. The
+// briefing content lives in data/peer-briefing.md (editable without redeploy);
+// who-was-briefed-when persists in data/briefed-peers.json so a server restart
+// does not re-spam everyone.
+//
+// Hulki's own session (= this repo's cwd) is recorded as briefed but never
+// actually sent — we don't brief ourselves.
+
+let briefedPeers = new Map(); // peer_id → { cwd, briefed_at, skipped? }
+
+async function loadBriefedPeers() {
+  try {
+    if (existsSync(BRIEFED_PEERS_PATH)) {
+      const raw = JSON.parse(await fs.readFile(BRIEFED_PEERS_PATH, "utf8"));
+      briefedPeers = new Map(Object.entries(raw));
+    }
+  } catch (err) {
+    console.warn("[briefing] could not load briefed-peers.json:", err.message);
+  }
+}
+
+async function saveBriefedPeers() {
+  try {
+    const obj = Object.fromEntries(briefedPeers);
+    await fs.writeFile(BRIEFED_PEERS_PATH, JSON.stringify(obj, null, 2));
+  } catch (err) {
+    console.warn("[briefing] could not save briefed-peers.json:", err.message);
+  }
+}
+
+async function getBriefingText() {
+  if (!existsSync(BRIEFING_MD_PATH)) return null;
+  const txt = (await fs.readFile(BRIEFING_MD_PATH, "utf8")).trim();
+  return txt || null;
+}
+
+async function briefPeer(peer, { force = false } = {}) {
+  if (!peer?.id) return { sent: false, reason: "no_id" };
+  if (!force && briefedPeers.has(peer.id)) return { sent: false, reason: "already_briefed" };
+  // Hulki doesn't brief herself — record as skipped so the loop ignores her.
+  if (peer.cwd === SELF_CWD) {
+    briefedPeers.set(peer.id, { cwd: peer.cwd, briefed_at: new Date().toISOString(), skipped: "self" });
+    await saveBriefedPeers();
+    return { sent: false, reason: "self" };
+  }
+  const text = await getBriefingText();
+  if (!text) return { sent: false, reason: "no_briefing_file" };
+  try {
+    await sendChannelMessage(peer.id, text);
+    briefedPeers.set(peer.id, { cwd: peer.cwd, briefed_at: new Date().toISOString() });
+    await saveBriefedPeers();
+    console.log(`[briefing] briefed peer ${peer.id} (${peer.cwd})`);
+    return { sent: true };
+  } catch (err) {
+    console.warn(`[briefing] could not brief ${peer.id}:`, err.message);
+    return { sent: false, reason: "send_failed", error: err.message };
+  }
+}
+
+async function briefingTick() {
+  try {
+    const peers = await fetchPeers();
+    for (const p of peers) await briefPeer(p);
+  } catch (err) {
+    console.warn("[briefing] tick failed:", err.message);
+  }
+}
+
+let briefingTimer = null;
+async function startBriefingLoop() {
+  if (briefingTimer) return;
+  await loadBriefedPeers();
+  await briefingTick();
+  briefingTimer = setInterval(briefingTick, BRIEFING_POLL_MS);
 }
 
 async function fetchPeers() {
@@ -974,6 +1060,8 @@ async function handleApi(req, res, url) {
           query: { refresh: "1 to bypass the 5 min cache" } },
         { method: "GET",  path: "/api/skills/body",      purpose: "full SKILL.md body (post-frontmatter) for one skill — for the UI detail panel",
           query: { path: "absolute path returned by /api/skills (must be under ~/.claude/skills/ or ~/.claude/plugins/cache/)" } },
+        { method: "GET",  path: "/api/briefing",         purpose: "current peer-briefing text + history of who has been briefed" },
+        { method: "POST", path: "/api/briefing/rebrief", purpose: "re-send briefing to one peer (or all). body: { peer_id } | { cwd } | { all: true }" },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -982,6 +1070,47 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skills") {
     const force = url.searchParams.get("refresh") === "1";
     return send(200, await readSkills({ force }));
+  }
+
+  // Briefing inspector: current MD content + log of who was briefed when.
+  // Helps Jörg see whether new peers actually get the message and edit the
+  // text without ssh-ing into the box.
+  if (req.method === "GET" && url.pathname === "/api/briefing") {
+    const text = await getBriefingText();
+    const history = Object.fromEntries(briefedPeers);
+    return send(200, {
+      briefing_path: BRIEFING_MD_PATH,
+      briefing_bytes: text ? text.length : 0,
+      briefing_text: text || null,
+      poll_interval_ms: BRIEFING_POLL_MS,
+      history,
+      history_count: briefedPeers.size,
+    });
+  }
+
+  // Force a re-briefing: { peer_id } targets one peer, { cwd } resolves first
+  // matching peer, { all: true } re-briefs every currently-online peer.
+  // Useful when you've edited peer-briefing.md and want existing peers to see
+  // the new version.
+  if (req.method === "POST" && url.pathname === "/api/briefing/rebrief") {
+    // Inline body read — readJson() is declared later in this function.
+    let raw = "";
+    for await (const c of req) raw += c;
+    let body = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { return send(400, { error: "invalid_json" }); }
+    const peers = await fetchPeers();
+    let targets = [];
+    if (body.all) targets = peers;
+    else if (body.peer_id) targets = peers.filter((p) => p.id === body.peer_id);
+    else if (body.cwd) targets = peers.filter((p) => p.cwd === body.cwd);
+    else return send(400, { error: "missing_target", hint: "send { peer_id } | { cwd } | { all: true }" });
+    if (!targets.length) return send(404, { error: "no_matching_peer", peers_online: peers.length });
+    const results = [];
+    for (const p of targets) {
+      // Force=true so we override the already-briefed flag for these targets.
+      results.push({ peer_id: p.id, cwd: p.cwd, ...(await briefPeer(p, { force: true })) });
+    }
+    return send(200, { rebriefed: results.length, results });
   }
 
   // Return the body (post-frontmatter) of one SKILL.md. Path must be one
@@ -1202,4 +1331,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[agent-master] listening on http://localhost:${PORT}`);
   console.log(`[agent-master] broker: ${BROKER_URL}`);
   console.log(`[agent-master] registry: ${REGISTRY_PATH}`);
+  startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
 });
