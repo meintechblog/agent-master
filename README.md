@@ -63,6 +63,8 @@ bash ~/codex/agent-master/install.sh --uninstall
   ●  live in broker        ○  not running
 ```
 
+The top-right of the header has a **view toggle**: `🛰 Agenten` (the dashboard) and `🧩 Skills` (a browser for every installed Claude Code skill under `~/.claude/skills/`, grouped by cluster, with search + filter — useful when you want to remember what `/gsd-execute-phase` or `/chatgpt-image-restyle` actually does).
+
 - **Sidebar:** one button per agent, sorted alphabetically. Coloured dot = live state in the claude-peers broker (green = registered, grey = offline). Role label on the right (Hub/Bridge/Infra/Domain).
 - **Header:** Plan-% (the same data Claude Code's `/usage` slash command shows) combined with ccusage's API-equivalent cost, plus a live countdown until the 5h-block and weekly window reset.
 - **Main panel:** capabilities, when-to-use, deployment, owned endpoints, MQTT topics, dependencies, secrets location, live dashboards, memory references, plus an HTTP health-check LED (separate from the broker live-state, since a service can be HTTP-reachable without a claude-peers session attached). Spawn or Stop button depending on live state.
@@ -121,6 +123,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/API.md`](docs/API.
 | `/api/plan-usage` | GET `?refresh=1` | Claude-Code plan %-utilization (5h + 7d, 5min cache) |
 | `/api/health` | GET `?refresh=1` | Parallel health-check pings (60s cache) |
 | `/api/events` | GET | **SSE stream** — `status` (3s), `usage` + `plan_usage` (5min) |
+| `/api/skills` | GET `?refresh=1` | All installed Claude Code skills (parsed from `~/.claude/skills/<name>/SKILL.md`), grouped by cluster. 5 min cached. |
 | `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab. Auto-clones the repo via `gh` if `repo_url` is set in the registry and the local path is missing. |
 | `/api/stop` | POST `{agent:"<key>"}` | Hard-stop: SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
 | `/api/soft-stop` | POST `{agent:"<key>"}` | Soft-stop: channel-message the agent ("save & wrap up"), 5 min grace, then hard-stop. One `+5 min` extension available to the agent itself via `/api/soft-stop-extend`. |

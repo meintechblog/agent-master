@@ -263,6 +263,135 @@
   .btn-warning:hover { background: #e8b94a; border-color: #e8b94a; }
   .btn-secondary { background: var(--panel-2); border-color: var(--border); color: var(--text-dim); }
   .btn-secondary:hover { background: var(--border); color: var(--text); }
+  .view-toggle {
+    display: flex;
+    gap: 4px;
+    background: var(--panel-2);
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .view-btn {
+    background: transparent;
+    border: 0;
+    color: var(--text-dim);
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 80ms;
+  }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.active { background: var(--accent); color: white; }
+  #skills-view {
+    padding: 24px 32px;
+    overflow-y: auto;
+    max-height: calc(100vh - 56px);
+  }
+  .skills-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  #skills-search {
+    flex: 1;
+    min-width: 260px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  #skills-search:focus { outline: none; border-color: var(--accent); }
+  .skills-clusters { display: flex; gap: 6px; flex-wrap: wrap; }
+  .cluster-pill {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 5px 10px;
+    border-radius: 14px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 80ms;
+    user-select: none;
+  }
+  .cluster-pill:hover { color: var(--text); border-color: var(--text-dim); }
+  .cluster-pill.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .skills-count {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .skills-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 14px;
+  }
+  .skill-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .skill-card:hover { border-color: var(--text-dim); }
+  .skill-card .head { display: flex; align-items: center; gap: 8px; }
+  .skill-card .name {
+    font-weight: 700;
+    color: var(--text);
+    font-size: 13px;
+    flex: 1;
+    word-break: break-all;
+  }
+  .skill-card .cluster-tag {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+  }
+  .skill-card .cluster-tag.GSD       { background: rgba(108, 92, 231, 0.18); color: var(--accent); }
+  .skill-card .cluster-tag.Browser   { background: rgba(0, 184, 148, 0.18);  color: var(--green); }
+  .skill-card .cluster-tag.Frontend  { background: rgba(253, 203, 110, 0.18); color: var(--yellow); }
+  .skill-card .cluster-tag.Workflow  { background: rgba(255, 165, 2, 0.20);   color: var(--orange); }
+  .skill-card .cluster-tag.Utility   { background: rgba(139, 139, 154, 0.18); color: var(--text-dim); }
+  .skill-card .desc {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .skill-card .arg-hint {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px;
+    color: var(--text);
+    background: var(--panel-2);
+    padding: 6px 8px;
+    border-radius: 4px;
+    border-left: 2px solid var(--accent);
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .skill-card .tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .skill-card .tools .chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    border-radius: 8px;
+  }
   .panel-section {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -366,6 +495,10 @@
 <body>
 <header>
   <h1 style="line-height:1.1">🛰 agent-master<span id="hub-name" style="display:block;font-size:11px;color:var(--text-dim);font-weight:400;margin-top:2px"></span></h1>
+  <div class="view-toggle">
+    <button class="view-btn active" id="view-agents" onclick="switchView('agents')">🛰 Agenten</button>
+    <button class="view-btn"        id="view-skills" onclick="switchView('skills')">🧩 Skills</button>
+  </div>
   <div class="sse-pill" id="sse-pill">connecting…</div>
   <div class="usage-bar" id="usage-bar">
     <div class="empty-tip">lade Limit…</div>
@@ -380,12 +513,24 @@
 
 <div class="usage-details" id="usage-details"></div>
 
-<div class="layout">
+<div class="layout" id="agents-layout">
   <nav class="tabs" id="tabs"></nav>
   <main id="content">
     <div class="empty-tip">Lade…</div>
   </main>
 </div>
+
+<section id="skills-view" style="display:none">
+  <div class="skills-toolbar">
+    <input type="text" id="skills-search" placeholder="Suche (Name oder Description)…" oninput="renderSkills()">
+    <div class="skills-clusters" id="skills-clusters"></div>
+    <span class="skills-count" id="skills-count"></span>
+    <button class="btn btn-secondary" onclick="loadSkills(true)" title="Cache (5 Min) umgehen + neu einlesen">⟳ Refresh</button>
+  </div>
+  <div class="skills-grid" id="skills-grid">
+    <div class="empty-tip">Lade Skills…</div>
+  </div>
+</section>
 
 <script>
 let state = { agents: {}, online_count: 0, total_count: 0 };
@@ -394,6 +539,9 @@ let usageData = null;
 let planUsageData = null;
 let active = null;
 let es = null;
+let view = "agents";
+let skillsData = null; // {skills, clusters, count, ...}
+let skillsActiveCluster = "All";
 
 function fmtCost(n) { return "$" + (n || 0).toFixed(2); }
 function fmtTok(n) { if (n > 1e6) return (n / 1e6).toFixed(1) + "M"; if (n > 1e3) return (n / 1e3).toFixed(1) + "k"; return String(n || 0); }
@@ -767,6 +915,79 @@ async function refreshHealthInBackground() {
     const r = await fetch("/api/health");
     healthData = await r.json();
   } catch {}
+}
+
+function switchView(v) {
+  view = v;
+  document.getElementById("view-agents").classList.toggle("active", v === "agents");
+  document.getElementById("view-skills").classList.toggle("active", v === "skills");
+  document.getElementById("agents-layout").style.display = v === "agents" ? "" : "none";
+  document.getElementById("skills-view").style.display = v === "skills" ? "" : "none";
+  if (v === "skills" && !skillsData) loadSkills(false);
+}
+
+async function loadSkills(force) {
+  const grid = document.getElementById("skills-grid");
+  grid.innerHTML = `<div class="empty-tip">${force ? "⟳ Refreshe Skills…" : "Lade Skills…"}</div>`;
+  try {
+    const r = await fetch("/api/skills" + (force ? "?refresh=1" : ""));
+    skillsData = await r.json();
+    renderSkillsClusters();
+    renderSkills();
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+function renderSkillsClusters() {
+  if (!skillsData) return;
+  const wrap = document.getElementById("skills-clusters");
+  const clusters = ["All", ...Object.keys(skillsData.clusters).sort()];
+  wrap.innerHTML = clusters.map((c) => {
+    const count = c === "All" ? skillsData.count : skillsData.clusters[c];
+    const active = c === skillsActiveCluster ? " active" : "";
+    return `<span class="cluster-pill${active}" onclick="setSkillsCluster('${c}')">${c} <span style="opacity:.7">${count}</span></span>`;
+  }).join("");
+}
+
+function setSkillsCluster(c) {
+  skillsActiveCluster = c;
+  renderSkillsClusters();
+  renderSkills();
+}
+
+function renderSkills() {
+  if (!skillsData) return;
+  const grid = document.getElementById("skills-grid");
+  const q = (document.getElementById("skills-search")?.value || "").toLowerCase().trim();
+  const filtered = skillsData.skills.filter((s) => {
+    if (skillsActiveCluster !== "All" && s.cluster !== skillsActiveCluster) return false;
+    if (q && !s.name.toLowerCase().includes(q) && !(s.description || "").toLowerCase().includes(q)) return false;
+    return true;
+  });
+  document.getElementById("skills-count").textContent =
+    `${filtered.length} von ${skillsData.count} Skills` + (skillsData.cached ? ` · cached ${Math.round(skillsData.age_ms / 1000)}s` : " · fresh");
+  if (!filtered.length) {
+    grid.innerHTML = `<div class="empty-tip">Keine Treffer.</div>`;
+    return;
+  }
+  grid.innerHTML = filtered.map((s) => {
+    const tools = (s.allowed_tools || []).map((t) => `<span class="chip">${t}</span>`).join("");
+    return `
+      <div class="skill-card">
+        <div class="head">
+          <span class="name">${s.name}</span>
+          <span class="cluster-tag ${s.cluster}">${s.cluster}</span>
+        </div>
+        ${s.description ? `<div class="desc">${escapeHtml(s.description)}</div>` : ""}
+        ${s.argument_hint ? `<div class="arg-hint">${escapeHtml(s.argument_hint)}</div>` : ""}
+        ${tools ? `<div class="tools">${tools}</div>` : ""}
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 function setSsePill(text, cls) {

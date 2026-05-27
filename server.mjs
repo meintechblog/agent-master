@@ -17,6 +17,8 @@ const REGISTRY_PATH = path.join(__dirname, "data", "registry.json");
 const REGISTRY_EXAMPLE_PATH = path.join(__dirname, "data", "registry.example.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SPAWN_LOG = path.join(__dirname, "data", "spawn.log");
+const SKILLS_DIR = path.join(process.env.HOME, ".claude", "skills");
+const SKILLS_CACHE_MS = 5 * 60 * 1000;
 
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 const HEALTH_CACHE_MS = 60 * 1000;
@@ -75,6 +77,135 @@ try {
 }
 function persistSoftStopState() {
   fs.writeFile(SOFT_STOP_STATE_PATH, JSON.stringify(Object.fromEntries(softStopState), null, 2)).catch(() => {});
+}
+
+// ── Skills (parses ~/.claude/skills/<name>/SKILL.md frontmatter) ───────────
+let skillsCache = { data: null, fetched_at: 0 };
+
+// Minimal YAML-frontmatter parser, just enough for our needs.
+// Handles: `key: value`, `key: "quoted value"`, multiline block scalars (`>` / `|`),
+// and `key:` followed by `  - item` lines (string arrays).
+function parseFrontmatter(text) {
+  const lines = text.split("\n");
+  if (lines[0]?.trim() !== "---") return null;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") { end = i; break; }
+  }
+  if (end < 0) return null;
+  const result = {};
+  let currentKey = null;
+  let currentMode = null; // "array" or "block"
+  let blockIndent = 0;
+  let blockBuf = [];
+  const flushBlock = () => {
+    if (currentMode === "block" && currentKey) {
+      result[currentKey] = blockBuf.join(" ").trim();
+    }
+    currentMode = null;
+    currentKey = null;
+    blockBuf = [];
+  };
+  for (let i = 1; i < end; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    // Array item under a key
+    if (currentMode === "array" && /^\s+-\s+/.test(line)) {
+      const val = line.replace(/^\s+-\s+/, "").trim().replace(/^["']|["']$/g, "");
+      result[currentKey] = result[currentKey] || [];
+      result[currentKey].push(val);
+      continue;
+    }
+    // Block scalar continuation (indented under a > or |)
+    if (currentMode === "block") {
+      const m = line.match(/^(\s+)(.*)$/);
+      if (m && m[1].length >= blockIndent) {
+        blockBuf.push(m[2]);
+        continue;
+      }
+      flushBlock();
+      // fall through to parse this line as a new key
+    }
+    // New key
+    const m = line.match(/^([A-Za-z_-]+):\s*(.*)$/);
+    if (!m) continue;
+    const key = m[1];
+    let val = m[2];
+    if (val === "") {
+      // Could be array, block, or empty. Look at next non-empty line.
+      const next = lines.slice(i + 1, end).find((l) => l.trim());
+      if (next && /^\s+-\s+/.test(next)) {
+        currentMode = "array"; currentKey = key; continue;
+      }
+      result[key] = "";
+      continue;
+    }
+    if (val === ">" || val === "|") {
+      currentMode = "block"; currentKey = key;
+      blockIndent = 2; blockBuf = [];
+      continue;
+    }
+    // Strip surrounding quotes
+    val = val.trim().replace(/^["']|["']$/g, "");
+    result[key] = val;
+  }
+  if (currentMode === "block") flushBlock();
+  return result;
+}
+
+function clusterForSkill(name) {
+  if (name.startsWith("gsd-")) return "GSD";
+  if (name.startsWith("browse")) return "Browser";
+  if (name.startsWith("frontend-design")) return "Frontend";
+  if (["thermomix-master", "chatgpt-image-restyle"].includes(name)) return "Workflow";
+  return "Utility";
+}
+
+async function readSkills({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && skillsCache.data && now - skillsCache.fetched_at < SKILLS_CACHE_MS) {
+    return { ...skillsCache.data, cached: true, age_ms: now - skillsCache.fetched_at };
+  }
+  if (!existsSync(SKILLS_DIR)) {
+    skillsCache = { data: { skills: [], clusters: {}, count: 0, dir: SKILLS_DIR, generated_at: new Date().toISOString() }, fetched_at: now };
+    return { ...skillsCache.data, cached: false, age_ms: 0, error: "skills_dir_missing" };
+  }
+  const entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
+  const skills = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const skillMdPath = path.join(SKILLS_DIR, e.name, "SKILL.md");
+    if (!existsSync(skillMdPath)) continue;
+    try {
+      const md = await fs.readFile(skillMdPath, "utf8");
+      const fm = parseFrontmatter(md) || {};
+      skills.push({
+        name: fm.name || e.name,
+        slug: e.name,
+        description: fm.description || "",
+        argument_hint: fm["argument-hint"] || null,
+        allowed_tools: fm["allowed-tools"] || [],
+        cluster: clusterForSkill(fm.name || e.name),
+        path: skillMdPath,
+      });
+    } catch (err) {
+      console.warn(`[skills] could not parse ${skillMdPath}:`, err.message);
+    }
+  }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  const clusters = {};
+  for (const s of skills) {
+    clusters[s.cluster] = (clusters[s.cluster] || 0) + 1;
+  }
+  const data = {
+    skills,
+    clusters,
+    count: skills.length,
+    dir: SKILLS_DIR,
+    generated_at: new Date().toISOString(),
+  };
+  skillsCache = { data, fetched_at: now };
+  return { ...data, cached: false, age_ms: 0 };
 }
 
 async function sendChannelMessage(toPeerId, text) {
@@ -677,9 +808,16 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
+        { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
+          query: { refresh: "1 to bypass the 5 min cache" } },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/skills") {
+    const force = url.searchParams.get("refresh") === "1";
+    return send(200, await readSkills({ force }));
   }
 
   // Discovery: filtered agent list. Lets a peer ask "give me agents that can X"
