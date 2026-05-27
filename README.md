@@ -122,7 +122,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/API.md`](docs/API.
 | `/api/health` | GET `?refresh=1` | Parallel health-check pings (60s cache) |
 | `/api/events` | GET | **SSE stream** — `status` (3s), `usage` + `plan_usage` (5min) |
 | `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab. Auto-clones the repo via `gh` if `repo_url` is set in the registry and the local path is missing. |
-| `/api/stop` | POST `{agent:"<key>"}` | SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
+| `/api/stop` | POST `{agent:"<key>"}` | Hard-stop: SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
+| `/api/soft-stop` | POST `{agent:"<key>"}` | Soft-stop: channel-message the agent ("save & wrap up"), 5 min grace, then hard-stop. One `+5 min` extension available to the agent itself via `/api/soft-stop-extend`. |
+| `/api/soft-stop-extend` | POST `{agent:"<key>"}` | Agent requests +5 min extension (one-shot). |
+| `/api/soft-stop-cancel` | POST `{agent:"<key>"}` | Abort a pending soft-stop, agent keeps running. |
 
 ### Peer-to-peer example
 

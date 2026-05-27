@@ -21,6 +21,13 @@ const SPAWN_LOG = path.join(__dirname, "data", "spawn.log");
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 const HEALTH_CACHE_MS = 60 * 1000;
 const BROADCAST_MS = 3000;
+const SOFT_STOP_GRACE_MS = 5 * 60 * 1000;
+const SOFT_STOP_TICK_MS = 15 * 1000;
+const SOFT_STOP_PROMPT = `Speichere alles aus der heutigen Session vernünftig ab, damit ich mal ein /clear machen kann und mit "weiter" Dann nahtlos mit dir weiterarbeiten kann - und denk dran ans Committen und Pushen und was egal, was nicht alles, damit eben alles rund ist. Wenn sonst noch was wichtiges offen ist -> autonom durchziehen. Schau, dass GitHub auch gerade gezogen ist und die Dokumentation dort passt.
+
+(Soft-Stop von Hulki-Hub. Du hast 5 Min. Wenn du mehr Zeit brauchst, ruf einmal:
+  curl -X POST http://localhost:7890/api/soft-stop-extend -H 'Content-Type: application/json' -d '{"agent":"<KEY>"}'
+und du bekommst +5 Min — danach erfolgt ein hard-stop (SIGTERM + close tab) automatisch.)`;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -52,6 +59,32 @@ try {
 }
 function persistSpawnedWindows() {
   fs.writeFile(SPAWNED_WINDOWS_PATH, JSON.stringify(Object.fromEntries(spawnedWindows), null, 2)).catch(() => {});
+}
+
+// Soft-stop state: repoKey → { started_at, hard_stop_at, extension_used, peer_id, reminded }
+// Persisted to disk so a server restart doesn't lose pending shutdowns.
+const SOFT_STOP_STATE_PATH = path.join(__dirname, "data", "soft-stop-state.json");
+const softStopState = new Map();
+try {
+  if (existsSync(SOFT_STOP_STATE_PATH)) {
+    const raw = JSON.parse(await fs.readFile(SOFT_STOP_STATE_PATH, "utf8"));
+    for (const [k, v] of Object.entries(raw)) softStopState.set(k, v);
+  }
+} catch (e) {
+  console.warn("[soft-stop] could not load state:", e.message);
+}
+function persistSoftStopState() {
+  fs.writeFile(SOFT_STOP_STATE_PATH, JSON.stringify(Object.fromEntries(softStopState), null, 2)).catch(() => {});
+}
+
+async function sendChannelMessage(toPeerId, text) {
+  const r = await fetch(`${BROKER_URL}/send-message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from_id: "agent-master-hub", to_id: toPeerId, text }),
+  });
+  if (!r.ok) throw new Error(`broker send-message ${r.status}: ${await r.text()}`);
+  return r.json();
 }
 
 async function readRegistry() {
@@ -168,6 +201,105 @@ async function spawnAgent(repoKey, registry) {
   );
   return { repoKey, windowId: wid, cwd, registered: !!peer, peer_id: peer?.id || null };
 }
+
+async function softStopAgent(repoKey, registry) {
+  const agent = registry.agents[repoKey];
+  if (!agent) throw new Error(`unknown agent: ${repoKey}`);
+  const peers = await fetchPeers();
+  const peer = peers.find((p) => p.cwd === agent.repo);
+  if (!peer) return { not_running: true, agent: repoKey };
+
+  const msg = SOFT_STOP_PROMPT.replace("<KEY>", repoKey);
+  await sendChannelMessage(peer.id, msg);
+
+  const now = Date.now();
+  const hardStopAt = now + SOFT_STOP_GRACE_MS;
+  softStopState.set(repoKey, {
+    started_at: now,
+    hard_stop_at: hardStopAt,
+    extension_used: false,
+    peer_id: peer.id,
+    reminded: false,
+  });
+  persistSoftStopState();
+  await fs.appendFile(
+    SPAWN_LOG,
+    `${new Date().toISOString()} soft-stop ${repoKey} peer_id=${peer.id} hard_stop_at=${new Date(hardStopAt).toISOString()}\n`
+  );
+  return { ok: true, agent: repoKey, peer_id: peer.id, hard_stop_at: new Date(hardStopAt).toISOString(), grace_seconds: SOFT_STOP_GRACE_MS / 1000 };
+}
+
+async function softStopExtendAgent(repoKey) {
+  const state = softStopState.get(repoKey);
+  if (!state) throw new Error(`no active soft-stop for ${repoKey}`);
+  if (state.extension_used) throw new Error(`extension already used for ${repoKey}`);
+  state.hard_stop_at += SOFT_STOP_GRACE_MS;
+  state.extension_used = true;
+  state.reminded = false;
+  persistSoftStopState();
+  try {
+    await sendChannelMessage(
+      state.peer_id,
+      `✓ Verlängerung gewährt — du hast +5 Min. Neuer hard-stop: ${new Date(state.hard_stop_at).toISOString()}. Mehr Verlängerungen sind nicht möglich. — Hulki (Hub)`
+    );
+  } catch (e) {
+    console.warn("[soft-stop] could not notify peer of extension:", e.message);
+  }
+  await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} soft-stop ${repoKey} extended hard_stop_at=${new Date(state.hard_stop_at).toISOString()}\n`);
+  return { ok: true, agent: repoKey, hard_stop_at: new Date(state.hard_stop_at).toISOString() };
+}
+
+async function softStopCancelAgent(repoKey) {
+  const state = softStopState.get(repoKey);
+  if (!state) return { not_active: true, agent: repoKey };
+  softStopState.delete(repoKey);
+  persistSoftStopState();
+  try {
+    await sendChannelMessage(state.peer_id, `Soft-Stop wurde abgebrochen — du kannst weitermachen. — Hulki (Hub)`);
+  } catch {}
+  await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} soft-stop ${repoKey} cancelled\n`);
+  return { ok: true, agent: repoKey };
+}
+
+async function softStopTick() {
+  if (softStopState.size === 0) return;
+  const now = Date.now();
+  for (const [repoKey, state] of [...softStopState.entries()]) {
+    // Reminder 30 s before hard-stop, one-shot.
+    if (!state.reminded && now >= state.hard_stop_at - 30 * 1000 && now < state.hard_stop_at) {
+      state.reminded = true;
+      persistSoftStopState();
+      try {
+        const extHint = state.extension_used
+          ? "Keine weitere Verlängerung möglich."
+          : `Letzte Chance für +5 Min:\n  curl -X POST http://localhost:7890/api/soft-stop-extend -H 'Content-Type: application/json' -d '{"agent":"${repoKey}"}'`;
+        await sendChannelMessage(
+          state.peer_id,
+          `⏰ 30 Sek bis hard-stop. ${extHint} — Hulki (Hub)`
+        );
+      } catch {}
+    }
+    // Hard-stop on deadline.
+    if (now >= state.hard_stop_at) {
+      try {
+        const registry = await readRegistry();
+        const result = await stopAgent(repoKey, registry);
+        softStopState.delete(repoKey);
+        persistSoftStopState();
+        await fs.appendFile(
+          SPAWN_LOG,
+          `${new Date().toISOString()} soft-stop ${repoKey} hard-stop-executed tabClosed=${result.tab_closed}\n`
+        );
+      } catch (e) {
+        await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} soft-stop ${repoKey} hard-stop-failed: ${e.message}\n`);
+        // Remove so we don't keep retrying forever
+        softStopState.delete(repoKey);
+        persistSoftStopState();
+      }
+    }
+  }
+}
+setInterval(softStopTick, SOFT_STOP_TICK_MS);
 
 async function stopAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
@@ -497,6 +629,7 @@ async function broadcastStatus() {
       online_count: peers.length,
       total_count: Object.keys(registry.agents).length,
       meta: registry._meta || null,
+      soft_stops: Object.fromEntries(softStopState),
       updated_at: new Date().toISOString(),
     };
     for (const res of sseClients) sseSend(res, "status", payload);
@@ -540,7 +673,10 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
-        { method: "POST", path: "/api/stop",             purpose: "stop an agent",    body: { agent: "<key>" } },
+        { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -601,6 +737,7 @@ async function handleApi(req, res, url) {
       online_count: peers.length,
       total_count: Object.keys(registry.agents).length,
       meta: registry._meta || null,
+      soft_stops: Object.fromEntries(softStopState),
       updated_at: new Date().toISOString(),
     });
   }
@@ -670,10 +807,56 @@ async function handleApi(req, res, url) {
     if (!registry.agents[parsed.agent]) return send(404, { error: "unknown_agent" });
     try {
       const result = await stopAgent(parsed.agent, registry);
+      // If a soft-stop was pending, clear it.
+      if (softStopState.has(parsed.agent)) {
+        softStopState.delete(parsed.agent);
+        persistSoftStopState();
+      }
       broadcastStatus();
       return send(200, result);
     } catch (e) {
       return send(500, { error: "stop_failed", reason: String(e.message) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/soft-stop") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    if (!parsed.agent) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[parsed.agent]) return send(404, { error: "unknown_agent" });
+    try {
+      const result = await softStopAgent(parsed.agent, registry);
+      broadcastStatus();
+      return send(200, result);
+    } catch (e) {
+      return send(500, { error: "soft_stop_failed", reason: String(e.message) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/soft-stop-extend") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    if (!parsed.agent) return send(400, { error: "missing_agent" });
+    try {
+      const result = await softStopExtendAgent(parsed.agent);
+      broadcastStatus();
+      return send(200, result);
+    } catch (e) {
+      return send(400, { error: "extend_failed", reason: String(e.message) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/soft-stop-cancel") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    if (!parsed.agent) return send(400, { error: "missing_agent" });
+    try {
+      const result = await softStopCancelAgent(parsed.agent);
+      broadcastStatus();
+      return send(200, result);
+    } catch (e) {
+      return send(500, { error: "cancel_failed", reason: String(e.message) });
     }
   }
 

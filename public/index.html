@@ -259,6 +259,10 @@
   .btn-primary { background: var(--accent); border-color: var(--accent); }
   .btn-danger { background: var(--red); border-color: var(--red); color: white; }
   .btn-danger:hover { background: #d63031; border-color: #d63031; }
+  .btn-warning { background: var(--yellow); border-color: var(--yellow); color: #1a1a23; }
+  .btn-warning:hover { background: #e8b94a; border-color: #e8b94a; }
+  .btn-secondary { background: var(--panel-2); border-color: var(--border); color: var(--text-dim); }
+  .btn-secondary:hover { background: var(--border); color: var(--text); }
   .panel-section {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -593,9 +597,27 @@ function renderContent() {
   const whenList = (a.when_to_use || []).map((w) => `<li>${w}</li>`).join("");
   const deps = (a.depends_on || []).map((d) => `<span class="chip">${d}</span>`).join("") || '<span class="empty-tip">keine</span>';
 
-  const actionBtns = a.live
-    ? `<button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Stop + Tab schließen</button>`
-    : `<button class="btn btn-primary" onclick="handleSpawn('${active}')">⚡ Spawn jetzt</button>`;
+  const softStop = state.soft_stops?.[active];
+  let actionBtns;
+  if (softStop) {
+    const remainingSec = Math.max(0, Math.round((new Date(softStop.hard_stop_at).getTime() - Date.now()) / 1000));
+    const mm = String(Math.floor(remainingSec / 60)).padStart(2, "0");
+    const ss = String(remainingSec % 60).padStart(2, "0");
+    const extBtn = softStop.extension_used
+      ? `<span style="font-size:11px;color:var(--text-dim)">Verlängerung verbraucht</span>`
+      : `<button class="btn btn-warning" onclick="handleSoftStopExtend('${active}')">⏰ +5 Min</button>`;
+    actionBtns = `
+      <span class="status-pill" style="background:rgba(253,203,110,0.18);color:var(--yellow)">💤 saving — ${mm}:${ss}</span>
+      ${extBtn}
+      <button class="btn btn-secondary" onclick="handleSoftStopCancel('${active}')">↩︎ Abbrechen</button>
+      <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Sofort hart stoppen</button>`;
+  } else if (a.live) {
+    actionBtns = `
+      <button class="btn btn-warning" onclick="handleSoftStop('${active}')" title="Save & Push, dann hart-stop nach 5 Min">💤 Soft-Stop</button>
+      <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Hart-Stop</button>`;
+  } else {
+    actionBtns = `<button class="btn btn-primary" onclick="handleSpawn('${active}')">⚡ Spawn jetzt</button>`;
+  }
 
   const displayName = a.display_name && a.display_name !== active
     ? `<span style="font-size:14px;color:var(--text-dim);font-weight:400;margin-left:2px">· ${a.display_name}</span>`
@@ -686,18 +708,37 @@ async function handleSpawn(key) {
 }
 
 async function handleStop(key) {
-  if (!confirm(`Agent ${key} stoppen + Terminal-Tab schließen?`)) return;
+  if (!confirm(`Agent ${key} HART stoppen + Tab schließen?\n\n(Soft-Stop: "💤 Soft-Stop"-Button — gibt 5 Min zum Speichern.)`)) return;
+  await postJson("/api/stop", { agent: key }, `⏹ Stoppe ${key}…`);
+}
+
+async function handleSoftStop(key) {
+  if (!confirm(`Soft-Stop für ${key}?\n\nAgent bekommt Befehl: "Speichere alles ab, committe + pushe, dann verabschiede dich". Nach 5 Min erfolgt automatisch hart-stop wenn keine Verlängerung angefordert wurde.`)) return;
+  await postJson("/api/soft-stop", { agent: key }, `💤 Soft-Stop ${key} — sende Save-Befehl…`);
+}
+
+async function handleSoftStopExtend(key) {
+  await postJson("/api/soft-stop-extend", { agent: key }, `⏰ Verlängere ${key} um 5 Min…`);
+}
+
+async function handleSoftStopCancel(key) {
+  if (!confirm(`Soft-Stop für ${key} abbrechen? Agent läuft normal weiter.`)) return;
+  await postJson("/api/soft-stop-cancel", { agent: key }, `↩︎ Soft-Stop für ${key} abbrechen…`);
+}
+
+async function postJson(path, body, pendingMsg) {
   const main = document.getElementById("content");
-  main.innerHTML = `<div class="empty-tip">⏹ Stoppe ${key}…</div>`;
+  if (pendingMsg) main.innerHTML = `<div class="empty-tip">${pendingMsg}</div>`;
   try {
-    const r = await fetch("/api/stop", {
+    const r = await fetch(path, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: key }),
+      body: JSON.stringify(body),
     });
     const result = await r.json();
     if (result.error) {
       main.innerHTML = `<div class="empty-tip" style="color:var(--red)">Fehler: ${result.error} ${result.reason || ""}</div>`;
     }
+    // SSE drives the rest
   } catch (e) {
     main.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
   }
