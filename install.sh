@@ -14,7 +14,7 @@ PORT="${AGENT_HUB_PORT:-7890}"
 PLIST_LABEL="${AGENT_HUB_LABEL:-com.${USER}.agent-hub}"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 ZSHRC="$HOME/.zshrc"
-ALIAS_LINE="alias claudepeers='claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers'"
+CLAUDEPEERS_BIN="$HOME/.local/bin/claudepeers"
 
 # ── ANSI ─────────────────────────────────────────────────────────────────────
 c_blue='\033[1;34m'
@@ -37,8 +37,12 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f "$PLIST_PATH"
     ok "LaunchAgent removed."
   fi
+  if [[ -f "$CLAUDEPEERS_BIN" ]]; then
+    rm -f "$CLAUDEPEERS_BIN"
+    ok "claudepeers wrapper removed ($CLAUDEPEERS_BIN)."
+  fi
   warn "Repo at $INSTALL_DIR left in place (rm -rf manually if you want)."
-  warn "claudepeers alias in $ZSHRC left in place (delete the line manually if you want)."
+  warn "PATH line in $ZSHRC left in place (delete the ~/.local/bin export manually if you want)."
   exit 0
 fi
 
@@ -91,18 +95,59 @@ if [[ ! -f "$INSTALL_DIR/data/registry.json" ]]; then
   ok "Seeded data/registry.json from example. Edit it to register your own agents."
 fi
 
-# ── claudepeers alias ────────────────────────────────────────────────────────
-if [[ -f "$ZSHRC" ]] && grep -qE '^alias claudepeers=' "$ZSHRC"; then
-  ok "claudepeers alias already in $ZSHRC"
-else
-  log "Adding claudepeers alias to $ZSHRC"
-  {
-    echo ""
-    echo "# claude-peers-mcp — added by agent-master installer"
-    echo "$ALIAS_LINE"
-  } >> "$ZSHRC"
-  ok "Alias appended. Open a new terminal or 'source $ZSHRC' to use it."
+# ── claudepeers wrapper ──────────────────────────────────────────────────────
+# An expect-based wrapper that auto-dismisses the dev-channel trust prompt.
+# Replaces the old alias-based approach (which required a manual Enter press).
+if ! command -v expect >/dev/null 2>&1; then
+  err "expect is required for the claudepeers wrapper but not found."
+  err "Install: brew install expect  (it's also part of the macOS base on most setups)"
+  exit 1
 fi
+
+# Remove legacy alias if a previous installer added one.
+if [[ -f "$ZSHRC" ]] && grep -qE "^alias claudepeers=" "$ZSHRC"; then
+  log "Removing legacy claudepeers alias from $ZSHRC (replaced by wrapper)"
+  # Drop the alias line and the agent-master-installer comment above it (if present).
+  /usr/bin/sed -i.bak \
+    -e '/^# claude-peers-mcp — added by agent-master installer$/d' \
+    -e '/^alias claudepeers=/d' "$ZSHRC"
+  ok "Legacy alias removed (backup at $ZSHRC.bak)."
+fi
+
+# Ensure ~/.local/bin is on PATH for non-interactive login shells too.
+mkdir -p "$HOME/.local/bin"
+if [[ -f "$ZSHRC" ]] && ! grep -qE '\.local/bin' "$ZSHRC"; then
+  log "Adding ~/.local/bin to PATH in $ZSHRC"
+  printf '\n# ~/.local/bin — added by agent-master installer (for claudepeers wrapper)\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$ZSHRC"
+  ok "PATH line appended."
+fi
+
+# Write the wrapper.
+log "Writing claudepeers wrapper → $CLAUDEPEERS_BIN"
+cat > "$CLAUDEPEERS_BIN" <<'WRAPPER'
+#!/usr/bin/expect -f
+# claudepeers — Claude Code with claude-peers-mcp channel, without the
+# "I am using this for local development" confirmation dialog.
+#
+# Wraps: claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers
+# Sends Enter at the trust prompt, then `interact` hands the full TTY to Claude.
+# All extra CLI args are forwarded (e.g. `claudepeers --resume`).
+
+set timeout 30
+set args $argv
+
+spawn claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers {*}$args
+
+expect {
+    "Enter to confirm" { send "\r" }
+    timeout            { }
+    eof                { exit 0 }
+}
+
+interact
+WRAPPER
+chmod +x "$CLAUDEPEERS_BIN"
+ok "claudepeers wrapper installed. Open a new terminal (or 'source $ZSHRC') to pick it up."
 
 # ── LaunchAgent plist ────────────────────────────────────────────────────────
 log "Writing LaunchAgent plist → $PLIST_PATH"
@@ -165,6 +210,7 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 printf "\n${c_green}━━━ agent-master is live ━━━${c_off}\n"
 printf "  Local:  ${c_blue}http://localhost:${PORT}${c_off}\n"
 [[ "$LAN_IP" != "localhost" ]] && printf "  LAN:    ${c_blue}http://${LAN_IP}:${PORT}${c_off}\n"
-printf "  Restart:  launchctl kickstart -k gui/\$(id -u)/${PLIST_LABEL}\n"
-printf "  Logs:     tail -f ${INSTALL_DIR}/data/server.stdout.log\n"
+printf "  Restart:    launchctl kickstart -k gui/\$(id -u)/${PLIST_LABEL}\n"
+printf "  Logs:       tail -f ${INSTALL_DIR}/data/server.stdout.log\n"
+printf "  Spawn CLI:  claudepeers   ${c_dim}(in a new terminal tab, after restart or 'source ~/.zshrc')${c_off}\n"
 printf "  Uninstall: bash ${INSTALL_DIR}/install.sh --uninstall\n\n"

@@ -9,14 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claudepeers` is now an expect-based wrapper** installed at `~/.local/bin/claudepeers` (replaces the previous alias in `~/.zshrc`). It auto-dismisses the `--dangerously-load-development-channels` trust prompt — confirmation cycle takes <500 ms and is invisible. Forwards extra CLI args (e.g. `claudepeers --resume`). The installer (`install.sh`) deploys the wrapper and removes any legacy alias it finds in `~/.zshrc`.
+- **Broker-polling in the spawn pipeline.** `/api/spawn` now polls `POST /list-peers` every 500 ms until the freshly-spawned peer appears with matching `cwd` (20 s deadline). The response includes `registered: true|false` and `peer_id`, so callers can tell whether the spawn actually succeeded.
 - **Live countdown to plan-window reset** in the header (`in 3h 12min`) under the reset timestamp, plus an `· in Xd Yh` suffix in the side panel. Ticks every 60 s client-side.
 - **Alias-aware liveness:** if an agent's `deployment.type === "alias"` (or it has `alias_for`), it inherits the live state of its target. Example: an alias entry for an agent that is actually run under a different key now shows up as live when the target is live.
 - **Favicon** (`public/favicon.svg`) — a dark hub-network icon matching the app's dark theme and purple accent.
 
 ### Changed
 
+- **Spawn pipeline overhauled (end-to-end fix for the "12 s dialog wait" problem).** The old approach was: launch claude, sleep 12 s, then send `key code 36` via osascript to the captured window-id to dismiss the dev-channel prompt. That was slow (12 s overhead per spawn), brittle (a foreground-app change could send the Enter to the wrong window — the bug behind "spawn just hangs sometimes"), and visually noisy. The expect-wrapper now handles dismissal inside the spawned process itself; the server just polls for broker registration. Net: spawns return in 3–6 s typical instead of 12 s+.
 - **Sidebar sort is now strictly alphabetical** (was: live-first, then by role, then by name). Less visual jitter when peers come and go.
-- **Sidebar removed the health-check LED.** The HTTP-ping status was visually competing with the live-dot and creating confusion ("is the agent running?"  vs. "is the service HTTP-reachable?"). Health LED now lives only in the main detail panel, with explanatory text next to it.
+- **Sidebar removed the health-check LED.** The HTTP-ping status was visually competing with the live-dot and creating confusion ("is the agent running?" vs. "is the service HTTP-reachable?"). Health LED now lives only in the main detail panel, with explanatory text next to it.
 - **Reset timestamp no longer prepends `(Xh Ymin)`** when same-day — that info is already shown by the new live countdown directly below.
 
 ## [0.1.0] — 2026-05-27

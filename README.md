@@ -27,7 +27,7 @@ curl -sSL https://raw.githubusercontent.com/meintechblog/agent-master/main/insta
 The installer:
 
 1. Clones into `~/codex/agent-master` (override with `AGENT_MASTER_DIR=…`)
-2. Adds the `claudepeers` alias to `~/.zshrc` if missing
+2. Writes the `claudepeers` expect-wrapper to `~/.local/bin/claudepeers` (auto-dismisses the dev-channel trust prompt, no manual Enter needed)
 3. Seeds `data/registry.json` from `data/registry.example.json` (edit it afterwards to register your own agents)
 4. Installs a macOS LaunchAgent (`com.$USER.agent-hub`) that auto-restarts the server
 5. Smoke-tests `http://localhost:7890`
@@ -95,7 +95,9 @@ Browser  ◀───── SSE ──────  agent-master server (Node, :
   └────────────────────────► Terminal.app
                               │
                               ├─ new tab: `cd <repo> && claudepeers`
-                              ├─ dismiss dev-channel dialog (Enter)
+                              │  (claudepeers is an expect-wrapper that
+                              │   auto-dismisses the dev-channel prompt)
+                              ├─ poll broker until peer registers (<5s typ.)
                               └─ on stop: SIGTERM PID + close tab (matched by tty)
 ```
 
@@ -201,7 +203,8 @@ LaunchAgent is optional — it's nice for auto-restart but not required.
 |---|---|---|
 | `spawn_failed repo dir missing` | Agent's `repo` path in `registry.json` doesn't exist on disk | Either clone the agent's repo there, or update the `repo` field in `data/registry.json` |
 | Plan-usage shows `n/a` | OAuth token expired or keychain locked | `claude auth login`, then refresh the page |
-| Spawn opens a window but the dev-channel dialog stays | Foreground app changed during the 12 s wait | Re-run; check `data/spawn.log` for the captured window id |
+| Spawn returns `registered: false` | claudepeers didn't finish booting / broker didn't see it within 20 s | Check `data/spawn.log` for the window id, look at that Terminal tab to see what claude printed |
+| `claudepeers: command not found` after install | `~/.local/bin` not on PATH yet in the existing shell | Open a new terminal tab, or `source ~/.zshrc` |
 | ccusage shows `n/a` for a while after install | `npx ccusage` first-run is downloading | Wait ~30 s, refresh |
 | Stop signal sent but Terminal tab stays | Peer registered with `tty: null` (rare) | PID was signalled; close the tab manually |
 

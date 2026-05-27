@@ -75,6 +75,17 @@ function runOsa(script) {
   });
 }
 
+async function waitForPeerRegistration(cwd, { timeoutMs = 20000, pollMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const peers = await fetchPeers();
+    const found = peers.find((p) => p.cwd === cwd);
+    if (found) return found;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return null;
+}
+
 async function spawnAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
   if (!agent) throw new Error(`unknown agent: ${repoKey}`);
@@ -92,6 +103,10 @@ async function spawnAgent(repoKey, registry) {
   e.mcpServers = e.mcpServers || {};
   await fs.writeFile(cjPath, JSON.stringify(cj, null, 2));
 
+  // The `claudepeers` command is an expect-wrapper (installed by install.sh into
+  // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. No sleep + no
+  // AppleScript keystroke needed here — we just open a tab, run claudepeers, and
+  // poll the broker until the peer registers (or timeout).
   const script = `
     tell application "Terminal" to activate
     tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
@@ -103,20 +118,12 @@ async function spawnAgent(repoKey, registry) {
   `;
   const wid = parseInt(await runOsa(script), 10);
 
-  await new Promise((r) => setTimeout(r, 12000));
-  const dismiss = `
-    tell application "Terminal"
-      activate
-      set index of window id ${wid} to 1
-      set selected of tab 1 of window id ${wid} to true
-    end tell
-    delay 0.5
-    tell application "System Events" to tell process "Terminal" to key code 36
-  `;
-  await runOsa(dismiss).catch(() => {});
-
-  await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} spawn ${repoKey} window=${wid}\n`);
-  return { repoKey, windowId: wid, cwd };
+  const peer = await waitForPeerRegistration(cwd);
+  await fs.appendFile(
+    SPAWN_LOG,
+    `${new Date().toISOString()} spawn ${repoKey} window=${wid} registered=${!!peer} peer_id=${peer?.id || "none"}\n`
+  );
+  return { repoKey, windowId: wid, cwd, registered: !!peer, peer_id: peer?.id || null };
 }
 
 async function stopAgent(repoKey, registry) {

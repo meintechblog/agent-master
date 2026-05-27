@@ -27,7 +27,7 @@ agent-master is intentionally tiny: one Node script, one HTML file, one JSON reg
 │   /api/health            │    Spawn/Stop pipeline:                         │
 │   /api/events  (SSE)     │      1. Patch ~/.claude.json trust flag         │
 │   /api/spawn  (POST)     │      2. AppleScript Cmd+T + `claudepeers`       │
-│   /api/stop   (POST)   ──┘      3. Wait 12s, AppleScript Enter             │
+│   /api/stop   (POST)   ──┘      3. Poll broker until peer registers       │
 │                                  4. (stop) SIGTERM PID + close tab by tty  │
 └────┬─────────────────────────────┬────────────────────────────────────────┘
      │                             │
@@ -67,12 +67,18 @@ Two things converge:
 
 Net effect: when you're not looking, the only cost is the running process. When you are looking, broker is polled every 3s (cheap, local Bun) and `ccusage` / `oauth/usage` every 5 min (capped).
 
-### Spawn pipeline via AppleScript
+### Spawn pipeline via AppleScript + expect-wrapper
 
 There's no programmatic "open a Terminal tab and run X" API on macOS, so we drive Terminal.app via osascript. Two non-obvious wrinkles:
 
-1. **`do script "…" without `in`** opens a new window. We want a new tab → first send Cmd+T via System Events, then `do script "…" in selected tab of front window`.
-2. **The dev-channel dialog.** `--dangerously-load-development-channels server:claude-peers` triggers a blocking "I am using this for local development" prompt. `--channels` skips the prompt but doesn't support `server:` entries — fails silently at runtime. Workaround: launch with the dangerous flag, then send the Enter key 12 s later via System Events. The tab's window-id is captured from the `do script` return value so we send the key to the right window.
+1. **`do script "…"` without `in`** opens a new window. We want a new tab → first send Cmd+T via System Events, then `do script "…" in selected tab of front window`.
+2. **The dev-channel dialog.** `--dangerously-load-development-channels server:claude-peers` triggers a blocking "I am using this for local development" prompt. `--channels` skips the prompt but doesn't support `server:` entries — fails silently at runtime.
+
+   **Solution:** the `claudepeers` command itself is an `expect(1)` wrapper at `~/.local/bin/claudepeers` (installed by `install.sh`). It `spawn`s claude, `expect`s the "Enter to confirm" string and sends `\r`, then `interact` hands the full TTY back to the user. The whole confirmation cycle takes <500 ms and is invisible to whoever launched it.
+
+   Previously this was handled by `setTimeout(12000)` + `osascript "key code 36"` from the server, which was slow (12 s overhead per spawn), brittle (foreground app changes could send the Enter to the wrong window), and noisy (you saw the dialog flash on screen). Both problems are gone with the wrapper.
+
+3. **Peer registration polling.** After the AppleScript spawn returns, the server polls `POST /list-peers` against the broker every 500 ms (with a 20 s deadline) until the new peer with matching `cwd` appears. Then `/api/spawn` returns `{ ok: true, registered: true, peer_id: ... }`. If the deadline hits, returns `{ registered: false }` — the spawn might have failed inside claude. Check `data/spawn.log`.
 
 ### Stop pipeline via tty matching
 
