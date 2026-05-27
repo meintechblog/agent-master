@@ -331,6 +331,45 @@
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 14px;
   }
+  /* Group section: header spans full width, then a nested mini-grid of cards. */
+  .skills-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .skill-group-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 0 0 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .skill-group-head .gname {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text);
+    font-weight: 700;
+  }
+  .skill-group-head .gcount {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .skill-group-head .ghint {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-left: auto;
+    font-style: italic;
+  }
+  .skill-group-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+  }
+  /* Favorites get a soft yellow accent on the header. */
+  .skill-group-head.fav .gname { color: var(--yellow); }
   .skill-card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -1200,6 +1239,56 @@ function setSkillsCluster(c) {
   renderSkills();
 }
 
+// Hint text shown next to each GSD/Browser group header — mirrors the
+// gsd-ns-* descriptions so users immediately know what's in the bucket.
+const GROUP_HINTS = {
+  GSD: {
+    Workflow:   "discuss · plan · execute · verify · phase · progress",
+    Review:     "code · debug · audit · security · eval · ui",
+    Ideate:     "explore · sketch · spike · capture",
+    Manage:     "config · workspace · workstreams · ship · inbox · help",
+    Project:    "milestones · audits · summary · profile · stats",
+    Context:    "map · graphify · docs · learnings · ingest",
+    Namespaces: "gsd-ns-* navigation shortcuts",
+    Other:      "uncategorized",
+  },
+  Browser: {
+    Drive:    "autonomous browser drivers",
+    Capture:  "fetch · search · trace · cookies",
+    Prospect: "company & event research",
+    Platform: "browserbase CLI & functions",
+    Other:    "uncategorized",
+  },
+};
+
+// Fixed display order — favorites always first, then by importance per cluster.
+const GROUP_ORDER = {
+  GSD:     ["Workflow", "Review", "Ideate", "Manage", "Project", "Context", "Namespaces", "Other"],
+  Browser: ["Drive", "Capture", "Prospect", "Platform", "Other"],
+};
+
+function renderSkillCard(s, idx) {
+  const tools = (s.allowed_tools || []).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("");
+  const isFav = skillFavorites.has(s.name);
+  const srcBadge = s.plugin
+    ? `<span class="src-badge plugin" title="from plugin: ${escapeHtml(s.plugin)}">P</span>`
+    : `<span class="src-badge user" title="from ~/.claude/skills/">U</span>`;
+  const safeName = escapeHtml(s.name).replace(/'/g, "\\'");
+  return `
+    <div class="skill-card${isFav ? " favorite" : ""}" data-skill-idx="${idx}" onclick="openSkillByIdx(${idx})">
+      <div class="head">
+        <button class="fav${isFav ? " on" : ""}" onclick="toggleSkillFavorite('${safeName}', event)" title="${isFav ? "Aus Favoriten entfernen" : "Zu Favoriten hinzufügen"}">${isFav ? "★" : "☆"}</button>
+        <span class="name">${s.name}</span>
+        ${srcBadge}
+        <span class="cluster-tag ${s.cluster}">${s.cluster}</span>
+        <button class="copy" onclick="copySkillCommand('${safeName}', event)" title="Copy /command to clipboard">📋</button>
+      </div>
+      ${s.description ? `<div class="desc">${escapeHtml(s.description)}</div>` : ""}
+      ${s.argument_hint ? `<div class="arg-hint">${escapeHtml(s.argument_hint)}</div>` : ""}
+      ${tools ? `<div class="tools">${tools}</div>` : ""}
+    </div>`;
+}
+
 function renderSkills() {
   if (!skillsData) return;
   const grid = document.getElementById("skills-grid");
@@ -1209,13 +1298,8 @@ function renderSkills() {
     if (q && !s.name.toLowerCase().includes(q) && !(s.description || "").toLowerCase().includes(q)) return false;
     return true;
   });
-  // Favorites first, then alphabetical (server already alpha-sorted).
-  filtered.sort((a, b) => {
-    const af = skillFavorites.has(a.name) ? 0 : 1;
-    const bf = skillFavorites.has(b.name) ? 0 : 1;
-    if (af !== bf) return af - bf;
-    return a.name.localeCompare(b.name);
-  });
+  // Stable alphabetical pre-sort so each section is alpha within itself.
+  filtered.sort((a, b) => a.name.localeCompare(b.name));
   const favCount = filtered.filter((s) => skillFavorites.has(s.name)).length;
   document.getElementById("skills-count").textContent =
     `${filtered.length} von ${skillsData.count} Skills`
@@ -1223,29 +1307,52 @@ function renderSkills() {
     + (skillsData.cached ? ` · cached ${Math.round(skillsData.age_ms / 1000)}s` : " · fresh");
   if (!filtered.length) {
     grid.innerHTML = `<div class="empty-tip">Keine Treffer.</div>`;
+    grid._filteredSkills = [];
     return;
   }
-  grid.innerHTML = filtered.map((s, i) => {
-    const tools = (s.allowed_tools || []).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("");
-    const isFav = skillFavorites.has(s.name);
-    const srcBadge = s.plugin
-      ? `<span class="src-badge plugin" title="from plugin: ${escapeHtml(s.plugin)}">P</span>`
-      : `<span class="src-badge user" title="from ~/.claude/skills/">U</span>`;
-    return `
-      <div class="skill-card${isFav ? " favorite" : ""}" data-skill-idx="${i}" onclick="openSkillByIdx(${i})">
-        <div class="head">
-          <button class="fav${isFav ? " on" : ""}" onclick="toggleSkillFavorite('${escapeHtml(s.name).replace(/'/g, "\\'")}', event)" title="${isFav ? "Aus Favoriten entfernen" : "Zu Favoriten hinzufügen"}">${isFav ? "★" : "☆"}</button>
-          <span class="name">${s.name}</span>
-          ${srcBadge}
-          <span class="cluster-tag ${s.cluster}">${s.cluster}</span>
-          <button class="copy" onclick="copySkillCommand('${escapeHtml(s.name).replace(/'/g, "\\'")}', event)" title="Copy /command to clipboard">📋</button>
-        </div>
-        ${s.description ? `<div class="desc">${escapeHtml(s.description)}</div>` : ""}
-        ${s.argument_hint ? `<div class="arg-hint">${escapeHtml(s.argument_hint)}</div>` : ""}
-        ${tools ? `<div class="tools">${tools}</div>` : ""}
-      </div>`;
-  }).join("");
-  // Store filtered order so openSkillByIdx finds the right object.
+
+  // Assign a stable filtered-index to every skill so click handlers can
+  // resolve the object regardless of how it was bucketed.
+  filtered.forEach((s, i) => { s._idx = i; });
+
+  // Bucket order:
+  //   1. ★ Favorites (always first, only if any exist)
+  //   2. Per-cluster groups in fixed GROUP_ORDER (when groups exist)
+  //   3. Otherwise a single flat list
+  const sections = [];
+  const favs = filtered.filter((s) => skillFavorites.has(s.name));
+  if (favs.length) sections.push({ key: "★ Favorites", hint: "klick-zugriff für deine wichtigsten Skills", cards: favs, fav: true });
+
+  // When "All" is active OR the cluster has no defined group order, render
+  // remaining skills flat. Otherwise bucket the non-favorite remainder.
+  const nonFav = filtered.filter((s) => !skillFavorites.has(s.name));
+  const groupOrder = GROUP_ORDER[skillsActiveCluster];
+  if (skillsActiveCluster === "All" || !groupOrder) {
+    if (nonFav.length) sections.push({ key: "Alle", hint: "", cards: nonFav });
+  } else {
+    const buckets = new Map(groupOrder.map((g) => [g, []]));
+    for (const s of nonFav) {
+      const g = s.group || "Other";
+      if (!buckets.has(g)) buckets.set(g, []);
+      buckets.get(g).push(s);
+    }
+    for (const g of groupOrder) {
+      const cards = buckets.get(g);
+      if (cards?.length) sections.push({ key: g, hint: GROUP_HINTS[skillsActiveCluster]?.[g] || "", cards });
+    }
+  }
+
+  grid.innerHTML = `<div class="skills-sections">` + sections.map((sec) => `
+    <div>
+      <div class="skill-group-head${sec.fav ? " fav" : ""}">
+        <span class="gname">${escapeHtml(sec.key)}</span>
+        <span class="gcount">${sec.cards.length}</span>
+        ${sec.hint ? `<span class="ghint">${escapeHtml(sec.hint)}</span>` : ""}
+      </div>
+      <div class="skill-group-grid">
+        ${sec.cards.map((s) => renderSkillCard(s, s._idx)).join("")}
+      </div>
+    </div>`).join("") + `</div>`;
   grid._filteredSkills = filtered;
 }
 

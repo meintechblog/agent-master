@@ -173,6 +173,65 @@ function clusterForSkill(name, pluginPrefix) {
   return "Utility";
 }
 
+// Sub-cluster ("group") inside a cluster, so 67 GSD skills don't drown the UI.
+// GSD groups mirror the official `gsd-ns-*` namespaces (review/ideate/manage/
+// project/context/workflow); see ~/.claude/plugins/cache for the source.
+// Browser groups split by intent (drive vs. capture vs. prospect vs. platform).
+// Unknown → "Other" so we never lose a skill.
+const GSD_GROUPS = {
+  Workflow: new Set([
+    "discuss-phase", "plan-phase", "execute-phase", "verify-work", "phase",
+    "progress", "autonomous", "mvp-phase", "ultraplan-phase",
+    "ai-integration-phase", "ui-phase", "pr-branch", "validate-phase",
+    "add-tests", "pause-work", "resume-work", "spec-phase",
+  ]),
+  Review: new Set([
+    "code-review", "debug", "audit-fix", "audit-uat", "audit-milestone",
+    "secure-phase", "eval-review", "ui-review", "plan-review-convergence",
+    "review", "review-backlog",
+  ]),
+  Ideate: new Set(["explore", "sketch", "spike", "capture"]),
+  Manage: new Set([
+    "config", "workspace", "workstreams", "thread", "update", "ship", "inbox",
+    "settings", "surface", "manager", "help", "health", "forensics", "fast",
+    "quick", "undo", "cleanup", "import",
+  ]),
+  Project: new Set([
+    "new-project", "new-milestone", "complete-milestone", "milestone-summary",
+    "profile-user", "stats",
+  ]),
+  Context: new Set([
+    "map-codebase", "graphify", "docs-update", "extract-learnings", "ingest-docs",
+  ]),
+};
+
+const BROWSE_GROUPS = {
+  Drive:    new Set(["autobrowse", "browser", "safe-browser", "ui-test"]),
+  Capture:  new Set(["search", "fetch", "browser-trace", "browser-to-api", "cookie-sync"]),
+  Prospect: new Set(["company-research", "event-prospecting"]),
+  Platform: new Set(["browserbase-cli", "functions"]),
+};
+
+function groupForSkill(baseName, cluster, pluginPrefix) {
+  if (cluster === "GSD") {
+    // baseName is "gsd-discuss-phase" / "gsd-ns-review" — strip the prefix
+    // before matching against GSD_GROUPS (which use the bare verb).
+    const stem = baseName.replace(/^gsd-/, "");
+    if (stem.startsWith("ns-")) return "Namespaces";
+    for (const [group, set] of Object.entries(GSD_GROUPS)) {
+      if (set.has(stem)) return group;
+    }
+    return "Other";
+  }
+  if (cluster === "Browser") {
+    for (const [group, set] of Object.entries(BROWSE_GROUPS)) {
+      if (set.has(baseName)) return group;
+    }
+    return "Other";
+  }
+  return null; // no sub-grouping for tiny clusters
+}
+
 // Scan ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<slug>/SKILL.md
 async function scanPluginSkills() {
   const skills = [];
@@ -201,6 +260,7 @@ async function scanPluginSkills() {
             const fm = parseFrontmatter(md) || {};
             const baseName = fm.name || sd.name;
             const displayName = `${pl.name}:${baseName}`;
+            const cluster = clusterForSkill(baseName, pl.name);
             skills.push({
               name: displayName,
               slug: sd.name,
@@ -209,7 +269,8 @@ async function scanPluginSkills() {
               description: fm.description || "",
               argument_hint: fm["argument-hint"] || null,
               allowed_tools: normalizeAllowedTools(fm["allowed-tools"]),
-              cluster: clusterForSkill(baseName, pl.name),
+              cluster,
+              group: groupForSkill(baseName, cluster, pl.name),
               path: mdPath,
             });
           } catch (err) {
@@ -238,6 +299,7 @@ async function readSkills({ force = false } = {}) {
         const md = await fs.readFile(skillMdPath, "utf8");
         const fm = parseFrontmatter(md) || {};
         const baseName = fm.name || e.name;
+        const cluster = clusterForSkill(baseName, null);
         skills.push({
           name: baseName,
           slug: e.name,
@@ -245,8 +307,9 @@ async function readSkills({ force = false } = {}) {
           marketplace: null,
           description: fm.description || "",
           argument_hint: fm["argument-hint"] || null,
-          allowed_tools: fm["allowed-tools"] || [],
-          cluster: clusterForSkill(baseName, null),
+          allowed_tools: normalizeAllowedTools(fm["allowed-tools"]),
+          cluster,
+          group: groupForSkill(baseName, cluster, null),
           path: skillMdPath,
         });
       } catch (err) {
@@ -263,12 +326,18 @@ async function readSkills({ force = false } = {}) {
   }
   skills.sort((a, b) => a.name.localeCompare(b.name));
   const clusters = {};
+  const groups = {}; // { cluster: { group: count } } — drives the UI sub-sections.
   for (const s of skills) {
     clusters[s.cluster] = (clusters[s.cluster] || 0) + 1;
+    if (s.group) {
+      groups[s.cluster] = groups[s.cluster] || {};
+      groups[s.cluster][s.group] = (groups[s.cluster][s.group] || 0) + 1;
+    }
   }
   const data = {
     skills,
     clusters,
+    groups,
     count: skills.length,
     dir: SKILLS_DIR,
     generated_at: new Date().toISOString(),
