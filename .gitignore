@@ -1,0 +1,12 @@
+# Runtime state
+data/*.log
+data/spawn.log
+
+# Local artifacts
+node_modules/
+.DS_Store
+*.bak
+*.bak.*
+
+# Local plist patches (installer regenerates per machine)
+launchd/*.local.plist

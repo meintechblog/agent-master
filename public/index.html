@@ -1,0 +1,770 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-master · Übersicht</title>
+<style>
+  :root {
+    --bg: #0f0f14;
+    --panel: #1a1a23;
+    --panel-2: #232330;
+    --border: #2d2d3d;
+    --text: #e8e8ef;
+    --text-dim: #8b8b9a;
+    --accent: #6c5ce7;
+    --green: #00b894;
+    --red: #ff7675;
+    --yellow: #fdcb6e;
+    --orange: #ffa502;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel);
+    gap: 24px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .sse-pill {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+  }
+  .sse-pill.live { background: rgba(0, 184, 148, 0.15); color: var(--green); }
+  .sse-pill.lost { background: rgba(255, 118, 117, 0.15); color: var(--red); }
+  .usage-bar {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-dim);
+    overflow: hidden;
+  }
+  .plan-block {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 130px;
+  }
+  .plan-block .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+  }
+  .plan-block .pct {
+    font-size: 16px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .plan-block .pct .api {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+  }
+  .plan-block .sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .plan-meter {
+    width: 130px;
+    height: 4px;
+    background: var(--panel-2);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 1px;
+  }
+  .plan-meter > div {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green), var(--yellow) 60%, var(--orange) 85%, var(--red) 100%);
+    transition: width 600ms;
+  }
+  .usage-toggle {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .usage-toggle:hover { color: var(--text); border-color: var(--accent); }
+  .usage-details {
+    position: fixed;
+    top: 56px;
+    right: 16px;
+    width: 320px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    z-index: 50;
+    display: none;
+  }
+  .usage-details.open { display: block; }
+  .usage-details h4 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+  }
+  .usage-details .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px dashed var(--border);
+  }
+  .usage-details .row:last-child { border-bottom: none; }
+  .usage-details .row .k { color: var(--text-dim); }
+  .usage-details .row .v { color: var(--text); }
+  .stats {
+    color: var(--text-dim);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .stats .live { color: var(--green); font-weight: 600; }
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    min-height: calc(100vh - 56px);
+  }
+  nav.tabs {
+    border-right: 1px solid var(--border);
+    padding: 12px 0;
+    background: var(--panel);
+    overflow-y: auto;
+    max-height: calc(100vh - 56px);
+  }
+  nav.tabs button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 16px;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    border-left: 3px solid transparent;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: background 80ms;
+  }
+  nav.tabs button:hover { background: var(--panel-2); }
+  nav.tabs button.active {
+    background: var(--panel-2);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.offline { background: #444; }
+  .tab-name { flex: 1; }
+  .tab-role {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  main {
+    padding: 24px 32px;
+    overflow-y: auto;
+    max-height: calc(100vh - 56px);
+  }
+  .panel-title {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .panel-sub {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 0 0 24px;
+  }
+  .status-strip {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    padding: 14px 18px;
+    background: var(--panel);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .status-pill {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+  }
+  .status-pill.live { background: rgba(0, 184, 148, 0.15); color: var(--green); }
+  .status-pill.offline { background: rgba(255, 118, 117, 0.12); color: var(--red); }
+  .btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: all 80ms;
+  }
+  .btn:hover { background: var(--accent); border-color: var(--accent); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); }
+  .btn-danger { background: var(--red); border-color: var(--red); color: white; }
+  .btn-danger:hover { background: #d63031; border-color: #d63031; }
+  .panel-section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin-bottom: 16px;
+  }
+  .panel-section h3 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .desc { font-size: 14px; line-height: 1.6; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    padding: 4px 10px;
+    border-radius: 14px;
+    background: var(--panel-2);
+    font-size: 12px;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .when-list { margin: 0; padding-left: 20px; }
+  .when-list li { margin-bottom: 4px; }
+  code, .mono {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .memref a { color: var(--accent); text-decoration: none; font-size: 12px; }
+  .memref a:hover { text-decoration: underline; }
+  .summary-box {
+    background: var(--bg);
+    border-left: 3px solid var(--green);
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .empty-tip { color: var(--text-dim); font-style: italic; font-size: 13px; }
+  .footer-note {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .role-badge {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+  .role-Hub { background: rgba(255, 107, 107, 0.15); color: #ff7675; }
+  .role-Bridge { background: rgba(78, 205, 196, 0.15); color: #4ecdc4; }
+  .role-Domain { background: rgba(254, 202, 87, 0.15); color: #feca57; }
+  .role-Infra { background: rgba(0, 210, 211, 0.15); color: #00d2d3; }
+  .deploy-grid {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 6px 16px;
+    font-size: 13px;
+  }
+  .deploy-grid .k { color: var(--text-dim); }
+  .health-led {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: #444;
+    vertical-align: middle;
+  }
+  .health-led.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .health-led.warn { background: var(--yellow); }
+  .health-led.down { background: var(--red); }
+  .health-led.skip { background: #444; }
+  .endpoint-row {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    padding: 4px 0;
+  }
+  .endpoint-row .m {
+    display: inline-block;
+    width: 50px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰 agent-master</h1>
+  <div class="sse-pill" id="sse-pill">connecting…</div>
+  <div class="usage-bar" id="usage-bar">
+    <div class="empty-tip">lade Limit…</div>
+  </div>
+  <button class="usage-toggle" id="usage-toggle" onclick="toggleUsageDetails()">▼ Details</button>
+  <div class="stats">
+    <span class="live" id="online-count">–</span> /
+    <span id="total-count">–</span> Agenten ·
+    <span id="last-update">–</span>
+  </div>
+</header>
+
+<div class="usage-details" id="usage-details"></div>
+
+<div class="layout">
+  <nav class="tabs" id="tabs"></nav>
+  <main id="content">
+    <div class="empty-tip">Lade…</div>
+  </main>
+</div>
+
+<script>
+let state = { agents: {}, online_count: 0, total_count: 0 };
+let healthData = { checks: {} };
+let usageData = null;
+let planUsageData = null;
+let active = null;
+let es = null;
+
+function fmtCost(n) { return "$" + (n || 0).toFixed(2); }
+function fmtTok(n) { if (n > 1e6) return (n / 1e6).toFixed(1) + "M"; if (n > 1e3) return (n / 1e3).toFixed(1) + "k"; return String(n || 0); }
+function fmtMin(m) { if (m == null) return "–"; if (m < 60) return m + " min"; return Math.floor(m / 60) + "h " + (m % 60) + "min"; }
+function fmtTime() { return new Date().toLocaleTimeString("de-DE"); }
+
+function fmtResetTime(iso) {
+  if (!iso) return "–";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMin = Math.round((d - now) / 60000);
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return `${time} (${fmtMin(diffMin)})`;
+  const day = d.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+  return `${day} ${time}`;
+}
+
+function pctColor(pct) {
+  if (pct < 50) return "var(--green)";
+  if (pct < 75) return "var(--yellow)";
+  if (pct < 90) return "var(--orange)";
+  return "var(--red)";
+}
+
+function renderUsage() {
+  const bar = document.getElementById("usage-bar");
+  if (!planUsageData || planUsageData.error) {
+    bar.innerHTML = `<span class="empty-tip">plan-usage n/a${planUsageData?.error ? ": " + String(planUsageData.error).slice(0, 50) : ""}</span>`;
+    return;
+  }
+  const fh = planUsageData.five_hour;
+  const sd = planUsageData.seven_day;
+  const sdSonnet = planUsageData.seven_day_sonnet;
+  const ab = usageData?.active_block;
+  const seven = usageData?.last_7d;
+
+  // 5h-Block kombiniert: Plan-% + ccusage-$
+  const fhApi = ab ? ` <span class="api">≙ ${fmtCost(ab.costUSD)}</span>` : "";
+  const sdApi = seven ? ` <span class="api">≙ ${fmtCost(seven.cost)}</span>` : "";
+  const sonnetExtra = sdSonnet && sdSonnet.utilization > 0 ? ` · Sonnet ${sdSonnet.utilization}%` : "";
+
+  bar.innerHTML = `
+    <div class="plan-block">
+      <span class="label">5h-Block</span>
+      <span class="pct" style="color:${pctColor(fh.utilization)}">${fh.utilization}%${fhApi}</span>
+      <div class="plan-meter"><div style="width:${Math.min(100, fh.utilization)}%"></div></div>
+      <span class="sub">reset: ${fmtResetTime(fh.resets_at)}</span>
+    </div>
+    <div class="plan-block">
+      <span class="label">Woche${sonnetExtra ? "" : " (all models)"}</span>
+      <span class="pct" style="color:${pctColor(sd.utilization)}">${sd.utilization}%${sdApi}</span>
+      <div class="plan-meter"><div style="width:${Math.min(100, sd.utilization)}%"></div></div>
+      <span class="sub">reset: ${fmtResetTime(sd.resets_at)}${sonnetExtra}</span>
+    </div>
+    <span class="empty-tip" style="font-size:10px">${planUsageData.cached ? "cached " + Math.round(planUsageData.age_ms / 1000) + "s" : "fresh"} · ${planUsageData.subscription_type || "?"}/${planUsageData.rate_limit_tier || "?"}</span>
+  `;
+  renderUsageDetails();
+}
+
+function renderUsageDetails() {
+  const box = document.getElementById("usage-details");
+  if (!planUsageData && !usageData) {
+    box.innerHTML = `<span class="empty-tip">lade…</span>`;
+    return;
+  }
+  const fh = planUsageData?.five_hour;
+  const sd = planUsageData?.seven_day;
+  const sdOpus = planUsageData?.seven_day_opus;
+  const sdSonnet = planUsageData?.seven_day_sonnet;
+  const extra = planUsageData?.extra_usage;
+  const ab = usageData?.active_block;
+  const seven = usageData?.last_7d;
+
+  box.innerHTML = `
+    <h4>Plan-Verbrauch (Max ${planUsageData?.rate_limit_tier || "?"})</h4>
+    <div class="row"><span class="k">5h-Block</span><span class="v" style="color:${pctColor(fh?.utilization || 0)}">${fh?.utilization ?? "–"}%</span></div>
+    <div class="row"><span class="k">↳ reset</span><span class="v mono" style="font-size:11px">${fmtResetTime(fh?.resets_at)}</span></div>
+    <div class="row"><span class="k">7-Tage (all)</span><span class="v" style="color:${pctColor(sd?.utilization || 0)}">${sd?.utilization ?? "–"}%</span></div>
+    <div class="row"><span class="k">↳ reset</span><span class="v mono" style="font-size:11px">${fmtResetTime(sd?.resets_at)}</span></div>
+    ${sdSonnet ? `<div class="row"><span class="k">7-Tage Sonnet</span><span class="v">${sdSonnet.utilization}%</span></div>` : ""}
+    ${sdOpus ? `<div class="row"><span class="k">7-Tage Opus</span><span class="v">${sdOpus.utilization}%</span></div>` : ""}
+    ${extra?.is_enabled ? `<div class="row"><span class="k">Extra-Usage</span><span class="v">${extra.used_credits || 0} / ${extra.monthly_limit || 0}</span></div>` : ""}
+
+    <h4 style="margin-top:14px">API-Äquivalent (ccusage)</h4>
+    ${ab ? `
+      <div class="row"><span class="k">5h-Block kostet</span><span class="v">${fmtCost(ab.costUSD)}</span></div>
+      <div class="row"><span class="k">↳ Tokens</span><span class="v">${fmtTok(ab.totalTokens)}</span></div>
+      <div class="row"><span class="k">↳ Burn-Rate</span><span class="v">${ab.burnRate ? fmtCost(ab.burnRate.costPerHour) + "/h" : "–"}</span></div>
+      ${ab.projection ? `<div class="row"><span class="k">↳ Projection</span><span class="v">${fmtCost(ab.projection.totalCost)} · ${fmtTok(ab.projection.totalTokens)}</span></div>` : ""}
+    ` : `<div class="row"><span class="k">kein aktiver Block</span><span class="v">–</span></div>`}
+    ${seven ? `
+      <div class="row"><span class="k">7 Tage kostet</span><span class="v">${fmtCost(seven.cost)}</span></div>
+      <div class="row"><span class="k">↳ Tokens</span><span class="v">${fmtTok(seven.tokens)}</span></div>
+      <div class="row"><span class="k">↳ Blöcke</span><span class="v">${seven.blocks}</span></div>
+    ` : ""}
+    <div style="margin-top:10px;font-size:10px;color:var(--text-dim);text-align:right">
+      Plan: ${planUsageData?.cached ? "cached " + Math.round((planUsageData.age_ms||0)/1000) + "s" : "fresh"}
+      · API: ${usageData?.cached ? "cached " + Math.round((usageData.age_ms||0)/1000) + "s" : "fresh"}
+    </div>
+  `;
+}
+
+function toggleUsageDetails() {
+  const box = document.getElementById("usage-details");
+  const btn = document.getElementById("usage-toggle");
+  const open = box.classList.toggle("open");
+  btn.innerHTML = open ? "▲ schließen" : "▼ Details";
+}
+
+document.addEventListener("click", (e) => {
+  const box = document.getElementById("usage-details");
+  const btn = document.getElementById("usage-toggle");
+  if (!box.classList.contains("open")) return;
+  if (box.contains(e.target) || btn.contains(e.target)) return;
+  box.classList.remove("open");
+  btn.innerHTML = "▼ Details";
+});
+
+function renderTabs() {
+  const tabs = document.getElementById("tabs");
+  const entries = Object.entries(state.agents).sort((a, b) => {
+    if (a[1].live !== b[1].live) return a[1].live ? -1 : 1;
+    const order = ["Hub", "Bridge", "Infra", "Domain"];
+    const ra = order.indexOf(a[1].role);
+    const rb = order.indexOf(b[1].role);
+    if (ra !== rb) return ra - rb;
+    return a[0].localeCompare(b[0]);
+  });
+  tabs.innerHTML = "";
+  for (const [key, agent] of entries) {
+    const hc = healthData.checks?.[key];
+    const ledClass = hc ? hc.status : "skip";
+    const btn = document.createElement("button");
+    btn.className = "tab" + (active === key ? " active" : "");
+    btn.innerHTML = `
+      <span class="dot ${agent.live ? "live" : "offline"}"></span>
+      <span class="tab-name">${key}</span>
+      <span class="health-led ${ledClass}" title="health: ${hc?.status || "n/a"}"></span>
+      <span class="tab-role">${agent.role}</span>
+    `;
+    btn.onclick = () => { active = key; render(); };
+    tabs.appendChild(btn);
+  }
+}
+
+function renderDeployment(d) {
+  if (!d) return '<span class="empty-tip">kein deployment dokumentiert</span>';
+  const rows = [];
+  const push = (k, v) => v != null && rows.push(`<div class="k">${k}</div><div>${v}</div>`);
+  push("type", d.type);
+  push("host", d.host);
+  push("lxc_id", d.lxc_id);
+  push("ip", d.ip);
+  push("port", d.port);
+  push("service", d.service_name);
+  push("plist", d.plist ? `<code>${d.plist}</code>` : null);
+  push("install", d.install_method);
+  push("path", d.service_path);
+  push("lan_ip", d.lan_ip);
+  push("for (alias)", d.for);
+  push("manages", Array.isArray(d.manages) ? d.manages.join(", ") : null);
+  push("fallback_ip", d.fallback_ip);
+  push("alt_lxc_id", d.alt_lxc_id);
+  return `<div class="deploy-grid">${rows.join("")}</div>`;
+}
+
+function renderEndpoints(eps) {
+  if (!eps?.length) return '<span class="empty-tip">–</span>';
+  return eps.map((e) => `<div class="endpoint-row"><span class="m">${e.method}</span> ${e.path}${e.purpose ? ' <span style="color:var(--text-dim)">— ' + e.purpose + '</span>' : ''}</div>`).join("");
+}
+
+function renderMqtt(m) {
+  if (!m) return '<span class="empty-tip">–</span>';
+  const pub = (m.publishes || []).join(", ") || "–";
+  const sub = (m.subscribes || []).join(", ") || "–";
+  return `<div class="deploy-grid"><div class="k">pub</div><div class="mono">${pub}</div><div class="k">sub</div><div class="mono">${sub}</div></div>`;
+}
+
+function renderContent() {
+  const main = document.getElementById("content");
+  if (!active || !state.agents[active]) {
+    main.innerHTML = `<div class="empty-tip">Klicke links auf einen Agenten.</div>`;
+    return;
+  }
+  const a = state.agents[active];
+  const hc = healthData.checks?.[active];
+  const dashboards = (a.live_dashboards || [])
+    .map((d) => `<li>${d.replace(/(https?:\/\/[^\s)]+)/g, '<a href="$1" target="_blank" style="color:var(--accent)">$1</a>')}</li>`)
+    .join("");
+  const memrefs = (a.memory_refs || []).map((m) => `<span class="chip mono">${m}</span>`).join("");
+  const caps = (a.capabilities || []).map((c) => `<span class="chip" style="border-color:${a.color || "var(--border)"}">${c}</span>`).join("");
+  const tags = (a.tags || []).map((t) => `<span class="chip" style="font-size:10px">${t}</span>`).join("");
+  const whenList = (a.when_to_use || []).map((w) => `<li>${w}</li>`).join("");
+  const deps = (a.depends_on || []).map((d) => `<span class="chip">${d}</span>`).join("") || '<span class="empty-tip">keine</span>';
+
+  const actionBtns = a.live
+    ? `<button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Stop + Tab schließen</button>`
+    : `<button class="btn btn-primary" onclick="handleSpawn('${active}')">⚡ Spawn jetzt</button>`;
+
+  main.innerHTML = `
+    <h2 class="panel-title">
+      <span style="color:${a.color || "var(--text)"}">●</span>
+      ${active}
+      <span class="role-badge role-${a.role}">${a.role}</span>
+      ${tags}
+    </h2>
+    <p class="panel-sub">${a.description}</p>
+
+    <div class="status-strip">
+      ${a.live
+        ? `<span class="status-pill live">● LIVE</span><span class="mono">PID ${a.pid}</span><span class="mono">${a.tty || "no-tty"}</span><span style="color:var(--text-dim);font-size:12px">peer-id: ${a.peer_id}</span>`
+        : `<span class="status-pill offline">○ offline</span>`}
+      <span class="health-led ${hc?.status || 'skip'}" title="health-check"></span>
+      <span style="font-size:12px;color:var(--text-dim)">${hc ? (hc.status + (hc.http_status ? ' (' + hc.http_status + ')' : (hc.reason ? ': ' + hc.reason : ''))) : 'health n/a'}</span>
+      ${actionBtns}
+      <span style="margin-left:auto;color:var(--text-dim);font-size:12px">${a.repo}</span>
+    </div>
+
+    ${a.live && a.live_summary
+      ? `<div class="panel-section"><h3>Aktuelle Tätigkeit</h3><div class="summary-box">${a.live_summary}</div></div>`
+      : ""}
+
+    <div class="panel-section">
+      <h3>Deployment</h3>
+      ${renderDeployment(a.deployment)}
+    </div>
+
+    <div class="panel-section">
+      <h3>Skills / Capabilities</h3>
+      <div class="chips">${caps || '<span class="empty-tip">noch keine erfasst</span>'}</div>
+    </div>
+
+    <div class="panel-section">
+      <h3>Wann ansprechen?</h3>
+      ${whenList ? `<ul class="when-list">${whenList}</ul>` : '<span class="empty-tip">–</span>'}
+    </div>
+
+    <div class="panel-section">
+      <h3>Owned Endpoints</h3>
+      ${renderEndpoints(a.owned_endpoints)}
+    </div>
+
+    <div class="panel-section">
+      <h3>MQTT-Topics</h3>
+      ${renderMqtt(a.mqtt_topics)}
+    </div>
+
+    <div class="panel-section">
+      <h3>Depends on</h3>
+      <div class="chips">${deps}</div>
+    </div>
+
+    ${dashboards ? `<div class="panel-section"><h3>Live-Dashboards</h3><ul>${dashboards}</ul></div>` : ""}
+
+    ${memrefs ? `<div class="panel-section"><h3>Memory-Refs</h3><div class="chips memref">${memrefs}</div></div>` : ""}
+
+    <div class="footer-note">
+      Repo: <code>${a.repo}</code><br>
+      ${a.repo_url ? `URL: <a href="${a.repo_url}" target="_blank" style="color:var(--accent)">${a.repo_url}</a><br>` : ""}
+      ${a.secrets_at ? `Secrets: <code>${a.secrets_at}</code><br>` : ""}
+      Spawn: <code>cd ${a.repo} && claudepeers</code>
+    </div>
+  `;
+}
+
+async function handleSpawn(key) {
+  const main = document.getElementById("content");
+  main.innerHTML = `<div class="empty-tip">⚡ Spawne ${key}… (~15s inkl. Dialog-Dismiss)</div>`;
+  try {
+    const r = await fetch("/api/spawn", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: key }),
+    });
+    const result = await r.json();
+    if (result.error) {
+      main.innerHTML = `<div class="empty-tip" style="color:var(--red)">Fehler: ${result.error} ${result.reason || ""}</div>`;
+      return;
+    }
+    // SSE liefert das Update automatisch nach Spawn
+  } catch (e) {
+    main.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+async function handleStop(key) {
+  if (!confirm(`Agent ${key} stoppen + Terminal-Tab schließen?`)) return;
+  const main = document.getElementById("content");
+  main.innerHTML = `<div class="empty-tip">⏹ Stoppe ${key}…</div>`;
+  try {
+    const r = await fetch("/api/stop", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: key }),
+    });
+    const result = await r.json();
+    if (result.error) {
+      main.innerHTML = `<div class="empty-tip" style="color:var(--red)">Fehler: ${result.error} ${result.reason || ""}</div>`;
+    }
+  } catch (e) {
+    main.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+function render() {
+  renderTabs();
+  renderContent();
+  renderUsage();
+  document.getElementById("online-count").textContent = state.online_count;
+  document.getElementById("total-count").textContent = state.total_count;
+  document.getElementById("last-update").textContent = fmtTime();
+}
+
+async function refreshHealthInBackground() {
+  try {
+    const r = await fetch("/api/health");
+    healthData = await r.json();
+  } catch {}
+}
+
+function setSsePill(text, cls) {
+  const p = document.getElementById("sse-pill");
+  p.textContent = text;
+  p.className = "sse-pill " + cls;
+}
+
+function connectSse() {
+  if (es) es.close();
+  setSsePill("connecting…", "");
+  es = new EventSource("/api/events");
+  es.addEventListener("status", (ev) => {
+    state = JSON.parse(ev.data);
+    render();
+  });
+  es.addEventListener("usage", (ev) => {
+    usageData = JSON.parse(ev.data);
+    renderUsage();
+  });
+  es.addEventListener("plan_usage", (ev) => {
+    planUsageData = JSON.parse(ev.data);
+    renderUsage();
+  });
+  es.onopen = () => setSsePill("● live", "live");
+  es.onerror = () => {
+    setSsePill("reconnecting…", "lost");
+    setTimeout(connectSse, 3000);
+  };
+}
+
+async function init() {
+  // Initial fetch so first paint is fast (SSE catches up too)
+  try {
+    const r = await fetch("/api/status");
+    state = await r.json();
+    const live = Object.entries(state.agents).find(([k, a]) => a.live);
+    active = live ? live[0] : Object.keys(state.agents)[0];
+  } catch {}
+  await refreshHealthInBackground();
+  render();
+  connectSse();
+  // refresh health every 5 min (it's cached server-side; client fetch triggers a soft refresh)
+  setInterval(refreshHealthInBackground, 5 * 60 * 1000);
+  // re-render every minute to refresh the "letzte Aktualisierung" timestamp + sse age
+  setInterval(render, 60 * 1000);
+}
+
+// Pause SSE when tab is hidden — saves usage-refresh churn when user not looking
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (es) { es.close(); es = null; }
+    setSsePill("paused (tab hidden)", "");
+  } else if (!es) {
+    connectSse();
+  }
+});
+
+init();
+</script>
+</body>
+</html>

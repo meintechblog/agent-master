@@ -1,0 +1,34 @@
+{
+  "name": "agent-master",
+  "version": "0.1.0",
+  "description": "Web dashboard + HTTP-API for orchestrating claude-peers-mcp sessions across multiple repos. Tab per agent, spawn/stop from browser, live status via SSE, Claude Code plan-usage + ccusage cost display.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "install:macos": "bash install.sh",
+    "uninstall:macos": "bash install.sh --uninstall",
+    "restart": "launchctl kickstart -k gui/$(id -u)/com.hulki.agent-hub"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/meintechblog/agent-master.git"
+  },
+  "homepage": "https://github.com/meintechblog/agent-master",
+  "bugs": "https://github.com/meintechblog/agent-master/issues",
+  "keywords": [
+    "claude-code",
+    "claude-peers",
+    "claude-peers-mcp",
+    "agent-orchestration",
+    "multi-agent",
+    "dashboard",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}
