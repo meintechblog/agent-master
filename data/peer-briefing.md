@@ -52,6 +52,10 @@ curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
 #     cache_status, cache_key, plan_usage_hint }
 ```
 
+**expected_format Shortcut:** statt im System-Prompt „Output strict JSON, no fences" zu wiederholen, setze Body-Param `"expected_format": "json"|"markdown_table"|"bullet_list"|"single_word"|"single_line"`. Wird vor dein system geprependet.
+
+**Local LLM (Ollama):** `"model": "local:<ollama-tag>"` routet an `http://localhost:11434` (override via `OLLAMA_HOST`). `raw_cost_usd: 0`, kein Plan-Quota. Voraussetzung: Ollama läuft. Discovery der lokalen Modelle: `GET /api/llm/models?probe_ollama=1`.
+
 **Templates (Quick Win):** statt jedesmal system+model+max_tokens zu schreiben, nimm ein vordefiniertes Template. `GET /api/llm/templates` listet sie. Aktuell verfügbar: `commit-msg`, `log-summary`, `german-ui`, `trivial-doc-edit`, `structured-extraction`, `vendor-detect`, `severity-triage`. Beispiel:
 ```bash
 curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
