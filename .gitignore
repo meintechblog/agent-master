@@ -28,3 +28,5 @@ launchd/*.local.plist
 # Playwright / browser-driven testing artifacts (transient)
 .playwright-mcp/
 *.png
+.backups/
+*.jpeg
