@@ -478,11 +478,10 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  .skills-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 14px;
-  }
+  /* #skills-grid only ever wraps a single .skills-sections; the real card
+     grid is .skill-group-grid. Keep this a plain block so the inner grids
+     get the full content width (was a nested-grid collapse → 1 column). */
+  .skills-grid { display: block; }
   /* Group section: header spans full width, then a nested mini-grid of cards. */
   .skills-sections {
     display: flex;
@@ -1258,11 +1257,13 @@
     header {
       padding: 10px 12px;
       gap: 8px;
+      position: static;       /* let a taller wrapped header scroll away on phones */
     }
     header h1 { font-size: 16px; }
     .view-toggle { width: 100%; }
     .view-toggle .view-btn { flex: 1; text-align: center; padding: 6px 4px; font-size: 11px; }
     .usage-bar, .usage-toggle, .stats { width: 100%; }
+    .usage-bar { flex-wrap: wrap; overflow: visible; gap: 10px 16px; }  /* show plan note, don't clip it */
     .layout {
       grid-template-columns: 1fr;
     }
@@ -1343,6 +1344,21 @@
     .briefing-editor textarea { min-height: 200px; font-size: 11px; }
     .briefing-actions { flex-wrap: wrap; }
     .briefing-actions .status { margin-left: 0; flex-basis: 100%; }
+
+    /* Tighten content padding (was 24/32 → ~64px wasted on a 390px screen) */
+    main { padding: 16px 14px; }
+    #usage-view, #skills-view { padding: 16px 14px; }
+    /* Panel header: let the role/tag badges wrap instead of clipping off-screen */
+    .panel-title { font-size: 19px; flex-wrap: wrap; gap: 8px; row-gap: 6px; }
+    .panel-sub { font-size: 12px; margin-bottom: 18px; }
+    /* Deploy grid: narrower label column, break long mono values */
+    .deploy-grid { grid-template-columns: 92px 1fr; gap: 5px 12px; font-size: 12px; }
+    .deploy-grid > div { word-break: break-word; overflow-wrap: anywhere; }
+    /* KPI tiles: clean 2-up instead of cramped auto-fit */
+    .usage-kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+    /* Usage controls stack and spread */
+    .usage-head { gap: 12px; }
+    .usage-controls { width: 100%; justify-content: space-between; }
   }
 </style>
 </head>
