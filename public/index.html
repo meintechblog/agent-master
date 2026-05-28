@@ -1773,6 +1773,8 @@ function renderContent() {
 
     ${memrefs ? `<div class="panel-section"><h3>Memory-Refs</h3><div class="chips memref">${memrefs}</div></div>` : ""}
 
+    ${active === "sonnet-master" ? `<div class="panel-section" id="llm-stats-section"><h3>📊 LLM Gateway — Live-Usage</h3><div id="llm-stats-body" class="empty-tip">Lade Stats…</div></div>` : ""}
+
     <div class="footer-note">
       Repo: <code>${a.repo}</code><br>
       ${a.repo_url ? `URL: <a href="${a.repo_url}" target="_blank" style="color:var(--accent)">${a.repo_url}</a><br>` : ""}
@@ -1780,6 +1782,50 @@ function renderContent() {
       Spawn: <code>cd ${a.repo} && claudepeers</code>
     </div>
   `;
+
+  if (active === "sonnet-master") loadLlmStats();
+}
+
+async function loadLlmStats() {
+  const box = document.getElementById("llm-stats-body");
+  if (!box) return;
+  try {
+    const r = await fetch("/api/llm/stats");
+    const d = await r.json();
+    if (d.error) { box.innerHTML = `<span style="color:var(--red)">${d.error}</span>`; return; }
+    const renderWindow = (label, w) => {
+      const t = w.totals || {};
+      const models = Object.entries(w.by_model || {}).sort((a,b) => b[1].total_tokens - a[1].total_tokens);
+      const callers = Object.entries(w.by_caller || {}).sort((a,b) => b[1].total_tokens - a[1].total_tokens);
+      const fmtT = (n) => n >= 1000 ? (n/1000).toFixed(1) + "k" : Math.round(n);
+      const fmtC = (n) => "$" + (n || 0).toFixed(4);
+      return `
+        <div style="margin-bottom:18px">
+          <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:8px">
+            <div><span style="color:var(--text-dim)">${label} ·</span> <strong>${t.calls || 0}</strong> calls</div>
+            <div><strong>${fmtT(t.total_tokens || 0)}</strong> tokens</div>
+            <div><strong>${fmtT(t.output_tokens || 0)}</strong> output</div>
+            <div><strong>${fmtC(t.raw_cost_usd)}</strong> API-equiv</div>
+            <div><strong>${t.avg_latency_ms || 0}ms</strong> avg latency</div>
+          </div>
+          ${models.length ? `
+            <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin:8px 0 4px">per model</div>
+            <div class="deploy-grid">
+              ${models.map(([m, v]) => `<div class="k">${m}</div><div>${fmtT(v.total_tokens)} tok · ${fmtC(v.raw_cost_usd)}</div>`).join("")}
+            </div>` : ""}
+          ${callers.length ? `
+            <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin:10px 0 4px">per caller</div>
+            <div class="deploy-grid">
+              ${callers.map(([c, v]) => `<div class="k">${c}</div><div>${fmtT(v.total_tokens)} tok · ${fmtC(v.raw_cost_usd)}</div>`).join("")}
+            </div>` : ""}
+        </div>
+      `;
+    };
+    box.innerHTML = renderWindow("24h", d.last_24h || {}) + renderWindow("7d", d.last_7d || {})
+      + `<div style="font-size:11px;color:var(--text-dim);font-style:italic">${d.note || ""}</div>`;
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
 }
 
 async function handleSpawn(key) {

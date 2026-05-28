@@ -2326,7 +2326,9 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/llm/stats") {
-    // Aggregate today + 7d from InfluxDB llm_call measurement.
+    // Aggregate from InfluxDB llm_call measurement. Returns a tidy structure:
+    //   { last_24h: { totals, by_model, by_caller }, last_7d: {...} }
+    // Frontend renders this directly into the LLM-Gateway stats block.
     try {
       const target = await resolveInfluxTarget();
       const bucket = target.bucket;
@@ -2337,13 +2339,54 @@ async function handleApi(req, res, url) {
           |> filter(fn:(r)=>r._field=="total_tokens" or r._field=="output_tokens" or r._field=="raw_cost_usd" or r._field=="latency_ms")
           |> group(columns:["model","caller","_field"])
           |> sum()`;
+      const rollup = (rows) => {
+        if (!Array.isArray(rows)) return { error: rows?.error || "no_data", totals: {}, by_model: {}, by_caller: {} };
+        const totals = { calls: 0, total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, avg_latency_ms: 0 };
+        const byModel = {};
+        const byCaller = {};
+        let latencyN = 0;
+        for (const r of rows) {
+          const field = r._field;
+          const value = parseFloat(r._value);
+          if (!Number.isFinite(value) || !field) continue;
+          const model = r.model || "?";
+          const caller = r.caller || "?";
+          byModel[model] = byModel[model] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, calls: 0 };
+          byCaller[caller] = byCaller[caller] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, calls: 0 };
+          if (field === "total_tokens") {
+            totals.total_tokens += value;
+            byModel[model].total_tokens += value;
+            byCaller[caller].total_tokens += value;
+          } else if (field === "output_tokens") {
+            totals.output_tokens += value;
+            byModel[model].output_tokens += value;
+            byCaller[caller].output_tokens += value;
+            // We use output_tokens as the call counter — each call produces exactly one output_tokens row.
+            // (sum() over per-call rows gives the right total tokens, not call count, so count separately.)
+          } else if (field === "raw_cost_usd") {
+            totals.raw_cost_usd += value;
+            byModel[model].raw_cost_usd += value;
+            byCaller[caller].raw_cost_usd += value;
+          } else if (field === "latency_ms") {
+            totals.avg_latency_ms += value;
+            latencyN += 1;
+          }
+        }
+        // Call count = number of distinct latency_ms data points
+        totals.calls = latencyN;
+        if (latencyN > 0) totals.avg_latency_ms = Math.round(totals.avg_latency_ms / latencyN);
+        // by_model/by_caller need call-counts too — derive from output_tokens row count would need raw rows.
+        // Cheap heuristic: each call writes one row per field, so number of rows in a group / 4 fields = calls.
+        // We don't have that directly here; leave .calls=0 in subgroups for now.
+        return { totals, by_model: byModel, by_caller: byCaller };
+      };
       const [r24, r7d] = await Promise.all([
         queryFlux(buildQ("-24h")).catch((e) => ({ error: String(e.message) })),
         queryFlux(buildQ("-7d")).catch((e) => ({ error: String(e.message) })),
       ]);
       return send(200, {
-        last_24h: r24,
-        last_7d: r7d,
+        last_24h: rollup(r24),
+        last_7d: rollup(r7d),
         bucket,
         note: "raw_cost_usd is the API-equivalent price the Claude CLI reports; actual billing is against your Pro/Max plan token bucket — Sonnet+Opus have separate pools.",
       });
