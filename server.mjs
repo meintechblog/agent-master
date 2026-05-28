@@ -1703,6 +1703,35 @@ async function readClaudeOAuthToken() {
   });
 }
 
+/**
+ * Build a compact hint from the cached plan-usage payload. Lets LLM-Gateway
+ * callers do their own pacing (back off when quota is tight) without each
+ * caller polling /api/plan-usage themselves. Returns null if usage is unknown.
+ *
+ * Thresholds: ok < 70%, tight 70-89%, critical >= 90%.
+ */
+function buildPlanUsageHint(planUsage) {
+  if (!planUsage || planUsage.error) return null;
+  const sonnetPct = planUsage.seven_day_sonnet?.utilization ?? null;
+  const generalPct = planUsage.seven_day?.utilization ?? null;
+  const fiveHourPct = planUsage.five_hour?.utilization ?? null;
+  const top = Math.max(
+    typeof sonnetPct === "number" ? sonnetPct : 0,
+    typeof generalPct === "number" ? generalPct : 0,
+    typeof fiveHourPct === "number" ? fiveHourPct : 0,
+  );
+  let recommendation = "ok";
+  if (top >= 90) recommendation = "critical";
+  else if (top >= 70) recommendation = "tight";
+  return {
+    seven_day_sonnet_pct: sonnetPct,
+    seven_day_general_pct: generalPct,
+    five_hour_pct: fiveHourPct,
+    recommendation,
+    as_of: planUsage.generated_at || null,
+  };
+}
+
 async function fetchPlanUsage(force = false) {
   const now = Date.now();
   if (!force && planUsageCache.data && now - planUsageCache.fetched_at < PLAN_USAGE_CACHE_MS) {
@@ -2420,6 +2449,12 @@ async function handleApi(req, res, url) {
         provider: result.provider,
       }, `LLM ${result.logical_model} ← ${caller} (${isCacheHit ? "cache" : result.usage.total_tokens + "t"}, ${result.latency_ms}ms)`).catch(() => {});
       res.setHeader("X-Cache", result.cache_status || "skip");
+      // Attach plan-usage hint so callers can self-pace when quota tightens.
+      // Uses the in-memory cached payload (5min TTL) — never blocks the call.
+      try {
+        const hint = buildPlanUsageHint(planUsageCache?.data);
+        if (hint) result.plan_usage_hint = hint;
+      } catch { /* hint is best-effort */ }
       return send(200, result);
     } catch (e) {
       auditEvent("llm.call.fail", { target: caller, model: parsed.model || "?" }, `LLM FAIL ${caller}: ${e.message.slice(0, 80)}`).catch(() => {});
@@ -2475,6 +2510,12 @@ async function handleApi(req, res, url) {
         model: result.logical_model || parsed.model || "?",
         provider: result.provider,
       }, `LLM ${result.logical_model} ← ${caller} (stream${isCacheHit ? "/cache" : ""}, ${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
+      // For stream callers: emit the plan_usage_hint as a final SSE event so
+      // they can decide whether to back off on the NEXT call.
+      try {
+        const hint = buildPlanUsageHint(planUsageCache?.data);
+        if (hint) writeEvent("plan_usage_hint", hint);
+      } catch { /* hint is best-effort */ }
       if (!closed) res.end();
     } catch (e) {
       writeEvent("error", { error: String(e.message) });
