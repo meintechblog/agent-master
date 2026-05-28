@@ -1825,6 +1825,34 @@ async function fetchUsage(force = false) {
   }
 }
 
+// Plain node:https probe that ignores self-signed cert errors. Used for
+// services with `allow_insecure: true` in their health_check. We do NOT
+// patch the global fetch dispatcher — keeping the bypass narrow to this
+// one code path means a typo in someone else's `fetch()` call can't
+// accidentally accept a bad cert.
+async function probeInsecureHttps(targetUrl, method, timeoutMs) {
+  const { request } = await import("node:https");
+  const u = new URL(targetUrl);
+  return new Promise((resolve, reject) => {
+    const req = request({
+      method,
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      rejectUnauthorized: false,
+      timeout: timeoutMs,
+      headers: method === "POST" ? { "Content-Type": "application/json", "Content-Length": "2" } : {},
+    }, (res) => {
+      res.resume();
+      resolve({ status: res.statusCode });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error(`timeout after ${timeoutMs}ms`)); });
+    if (method === "POST") req.write("{}");
+    req.end();
+  });
+}
+
 async function fetchHealth(registry, force = false) {
   const now = Date.now();
   if (!force && healthCache.data && now - healthCache.fetched_at < HEALTH_CACHE_MS) {
@@ -1835,17 +1863,26 @@ async function fetchHealth(registry, force = false) {
       const hc = agent.health_check;
       if (!hc || !hc.url || hc.url.includes("TBD")) return [key, { status: "skip", reason: hc?.url?.includes("TBD") ? "TBD" : "no health_check.url" }];
       try {
-        const ctrl = new AbortController();
-        const to = setTimeout(() => ctrl.abort(), 3000);
-        const fetchOpts = { method: hc.method || "GET", signal: ctrl.signal };
-        if (fetchOpts.method === "POST") {
-          fetchOpts.headers = { "Content-Type": "application/json" };
-          fetchOpts.body = "{}";
-        }
-        const r = await fetch(hc.url, fetchOpts);
-        clearTimeout(to);
+        const method = hc.method || "GET";
         const expected = hc.expected_status || 200;
-        return [key, { status: r.status === expected ? "ok" : "warn", http_status: r.status, expected }];
+        let httpStatus;
+        if (hc.allow_insecure && hc.url.startsWith("https:")) {
+          // Self-signed cert path (e.g. thermomix LXC) — bypass cert verify.
+          const probed = await probeInsecureHttps(hc.url, method, 3000);
+          httpStatus = probed.status;
+        } else {
+          const ctrl = new AbortController();
+          const to = setTimeout(() => ctrl.abort(), 3000);
+          const fetchOpts = { method, signal: ctrl.signal };
+          if (method === "POST") {
+            fetchOpts.headers = { "Content-Type": "application/json" };
+            fetchOpts.body = "{}";
+          }
+          const r = await fetch(hc.url, fetchOpts);
+          clearTimeout(to);
+          httpStatus = r.status;
+        }
+        return [key, { status: httpStatus === expected ? "ok" : "warn", http_status: httpStatus, expected }];
       } catch (e) {
         return [key, { status: "down", reason: String(e.message).slice(0, 100) }];
       }
