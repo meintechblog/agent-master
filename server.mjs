@@ -678,6 +678,85 @@ async function startSkillUsageLoop() {
   skillUsageTimer = setInterval(skillUsageTick, SKILL_USAGE_POLL_MS);
 }
 
+// === External-backend model discovery ===
+//
+// Why: Jonas will load more models onto his Mac Studio over time. We poll
+// /v1/models on each registered external backend every 5 min and diff against
+// the model list persisted in data/external-llm.json. Diffs surface as
+// audit events ("Klick exposes new model 'qwen3-vl'") so we notice without
+// having to read upstream-config notes by hand. Never auto-edits the config
+// — humans decide whether a newly-visible model should become a default.
+const EXTERNAL_DISCOVERY_POLL_MS = 5 * 60 * 1000;
+const externalDiscoveryState = {
+  last_run_at: null,
+  last_summary: null,
+  last_error: null,
+  // backend → Set of model ids seen on the last poll. Used to detect adds/removes.
+  seen_models: new Map(),
+};
+
+async function discoverExternalModelsOnce() {
+  const { loadExternalConfig: loadExt } = await import("./lib/llm-external.mjs");
+  const cfg = await loadExt();
+  const events = [];
+  for (const [name, backend] of Object.entries(cfg.backends || {})) {
+    if (!backend.base_url) continue;
+    const url = `${backend.base_url.replace(/\/$/, "")}/v1/models`;
+    const apiKey = backend.api_key || (backend.api_key_env && process.env[backend.api_key_env]);
+    if (!apiKey) continue;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: ctrl.signal });
+      clearTimeout(t);
+      if (!r.ok) {
+        events.push({ backend: name, ok: false, reason: `HTTP ${r.status}` });
+        continue;
+      }
+      const j = await r.json();
+      const live = new Set((j.data || []).map((m) => m.id).filter(Boolean));
+      const known = externalDiscoveryState.seen_models.get(name) || new Set(backend.models || []);
+      const added = [...live].filter((m) => !known.has(m));
+      const removed = [...known].filter((m) => !live.has(m));
+      externalDiscoveryState.seen_models.set(name, live);
+      // Compare against the BACKEND's persisted models list, not the in-memory
+      // diff — that way a model that was always there but never declared in the
+      // config still gets surfaced once on first sight.
+      const declared = new Set(backend.models || []);
+      const newlyVisible = [...live].filter((m) => !declared.has(m));
+      events.push({ backend: name, ok: true, live: [...live], added, removed, newly_visible: newlyVisible });
+      // Fire audit events only for genuinely-new offerings since last poll.
+      if (added.length) {
+        await auditEvent("llm.discovery.added", { target: name }, `${name} exposes new models: ${added.join(", ")}`);
+      }
+      if (removed.length) {
+        await auditEvent("llm.discovery.removed", { target: name }, `${name} no longer exposes: ${removed.join(", ")}`);
+      }
+    } catch (e) {
+      events.push({ backend: name, ok: false, reason: e.message });
+    }
+  }
+  externalDiscoveryState.last_summary = events;
+  externalDiscoveryState.last_run_at = new Date().toISOString();
+  externalDiscoveryState.last_error = null;
+  return events;
+}
+
+let externalDiscoveryTimer = null;
+async function startExternalDiscoveryLoop() {
+  if (externalDiscoveryTimer) return;
+  await discoverExternalModelsOnce().catch((e) => {
+    externalDiscoveryState.last_error = e.message;
+    console.warn("[discovery] first tick failed:", e.message);
+  });
+  externalDiscoveryTimer = setInterval(() => {
+    discoverExternalModelsOnce().catch((e) => {
+      externalDiscoveryState.last_error = e.message;
+      console.warn("[discovery] tick failed:", e.message);
+    });
+  }, EXTERNAL_DISCOVERY_POLL_MS);
+}
+
 // === InfluxDB query helpers ===
 //
 // queryFlux() runs an arbitrary Flux statement against the default source
@@ -2427,6 +2506,20 @@ async function handleApi(req, res, url) {
     return send(200, await llmListModels(probeOllama));
   }
 
+  if (req.method === "GET" && url.pathname === "/api/llm/discovery") {
+    // Status of the external-model auto-discovery loop. ?run=1 forces a tick.
+    if (url.searchParams.get("run") === "1") {
+      const events = await discoverExternalModelsOnce();
+      return send(200, { ran_now: true, events, state: { last_run_at: externalDiscoveryState.last_run_at, last_error: externalDiscoveryState.last_error } });
+    }
+    return send(200, {
+      last_run_at: externalDiscoveryState.last_run_at,
+      last_summary: externalDiscoveryState.last_summary,
+      last_error: externalDiscoveryState.last_error,
+      poll_interval_ms: EXTERNAL_DISCOVERY_POLL_MS,
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/llm/cache") {
     // Cache status: size, hits, misses, evictions. ?clear=1 wipes it.
     if (url.searchParams.get("clear") === "1") {
@@ -2477,16 +2570,18 @@ async function handleApi(req, res, url) {
           + `output_tokens=${result.usage.output_tokens}i,`
           + `total_tokens=${result.usage.total_tokens}i,`
           + `latency_ms=${result.latency_ms}i,`
-          + `raw_cost_usd=${result.raw_cost_usd || 0} `
-          + `${BigInt(Date.now()) * 1_000_000n}`
+          + `raw_cost_usd=${result.raw_cost_usd || 0},`
+          + `shadow_cost_usd=${result.shadow_cost?.estimated_usd || 0}`
+          + ` ${BigInt(Date.now()) * 1_000_000n}`
         ]).catch(() => {});
       }
       auditEvent("llm.call", {
         target: caller,
         model: result.logical_model || parsed.model || "?",
         provider: result.provider,
-      }, `LLM ${result.logical_model} ← ${caller} (${isCacheHit ? "cache" : result.usage.total_tokens + "t"}, ${result.latency_ms}ms)`).catch(() => {});
+      }, `LLM ${result.logical_model} ← ${caller} (${isCacheHit ? "cache" : result.usage.total_tokens + "t"}, ${result.latency_ms}ms${result.fallback ? `, FALLBACK: ${result.fallback.from}→${result.fallback.to}` : ""}${result.shadow_cost ? `, saved $${result.shadow_cost.estimated_usd.toFixed(4)}` : ""})`).catch(() => {});
       res.setHeader("X-Cache", result.cache_status || "skip");
+      if (result.fallback) res.setHeader("X-Fallback", `${result.fallback.from}->${result.fallback.to}`);
       // Attach plan-usage hint so callers can self-pace when quota tightens.
       // Uses the in-memory cached payload (5min TTL) — never blocks the call.
       try {
@@ -2539,15 +2634,16 @@ async function handleApi(req, res, url) {
           + `output_tokens=${result.usage.output_tokens}i,`
           + `total_tokens=${result.usage.total_tokens}i,`
           + `latency_ms=${result.latency_ms}i,`
-          + `raw_cost_usd=${result.raw_cost_usd || 0} `
-          + `${BigInt(Date.now()) * 1_000_000n}`
+          + `raw_cost_usd=${result.raw_cost_usd || 0},`
+          + `shadow_cost_usd=${result.shadow_cost?.estimated_usd || 0}`
+          + ` ${BigInt(Date.now()) * 1_000_000n}`
         ]).catch(() => {});
       }
       auditEvent("llm.call", {
         target: caller,
         model: result.logical_model || parsed.model || "?",
         provider: result.provider,
-      }, `LLM ${result.logical_model} ← ${caller} (stream${isCacheHit ? "/cache" : ""}, ${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
+      }, `LLM ${result.logical_model} ← ${caller} (stream${isCacheHit ? "/cache" : ""}, ${result.usage.total_tokens}t, ${result.latency_ms}ms${result.fallback ? `, FALLBACK: ${result.fallback.from}→${result.fallback.to}` : ""})`).catch(() => {});
       // For stream callers: emit the plan_usage_hint as a final SSE event so
       // they can decide whether to back off on the NEXT call.
       try {
@@ -2574,12 +2670,12 @@ async function handleApi(req, res, url) {
         `from(bucket:"${bucket}")
           |> range(start:${range})
           |> filter(fn:(r)=>r._measurement=="llm_call")
-          |> filter(fn:(r)=>r._field=="total_tokens" or r._field=="output_tokens" or r._field=="raw_cost_usd" or r._field=="latency_ms")
+          |> filter(fn:(r)=>r._field=="total_tokens" or r._field=="output_tokens" or r._field=="raw_cost_usd" or r._field=="shadow_cost_usd" or r._field=="latency_ms")
           |> group(columns:["model","caller","_field"])
           |> sum()`;
       const rollup = (rows) => {
         if (!Array.isArray(rows)) return { error: rows?.error || "no_data", totals: {}, by_model: {}, by_caller: {} };
-        const totals = { calls: 0, total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, avg_latency_ms: 0 };
+        const totals = { calls: 0, total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, avg_latency_ms: 0 };
         const byModel = {};
         const byCaller = {};
         let latencyN = 0;
@@ -2589,8 +2685,8 @@ async function handleApi(req, res, url) {
           if (!Number.isFinite(value) || !field) continue;
           const model = r.model || "?";
           const caller = r.caller || "?";
-          byModel[model] = byModel[model] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, calls: 0 };
-          byCaller[caller] = byCaller[caller] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, calls: 0 };
+          byModel[model] = byModel[model] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, calls: 0 };
+          byCaller[caller] = byCaller[caller] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, calls: 0 };
           if (field === "total_tokens") {
             totals.total_tokens += value;
             byModel[model].total_tokens += value;
@@ -2605,6 +2701,10 @@ async function handleApi(req, res, url) {
             totals.raw_cost_usd += value;
             byModel[model].raw_cost_usd += value;
             byCaller[caller].raw_cost_usd += value;
+          } else if (field === "shadow_cost_usd") {
+            totals.shadow_cost_usd += value;
+            byModel[model].shadow_cost_usd += value;
+            byCaller[caller].shadow_cost_usd += value;
           } else if (field === "latency_ms") {
             totals.avg_latency_ms += value;
             latencyN += 1;
@@ -2626,7 +2726,7 @@ async function handleApi(req, res, url) {
         last_24h: rollup(r24),
         last_7d: rollup(r7d),
         bucket,
-        note: "raw_cost_usd is the API-equivalent price the Claude CLI reports; actual billing is against your Pro/Max plan token bucket — Sonnet+Opus have separate pools.",
+        note: "raw_cost_usd is the API-equivalent price the Claude CLI reports; actual billing is against your Pro/Max plan token bucket. shadow_cost_usd is the estimated cost the same call would have had on Anthropic if it ran on an external backend instead (e.g. klick).",
       });
     } catch (e) {
       return send(500, { error: "stats_failed", reason: String(e.message) });
@@ -2781,4 +2881,5 @@ server.listen(PORT, "0.0.0.0", () => {
   startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
   startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
   startHealthMonitorLoop().catch((e) => console.warn("[health] start failed:", e.message));
+  startExternalDiscoveryLoop().catch((e) => console.warn("[discovery] start failed:", e.message));
 });

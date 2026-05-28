@@ -56,7 +56,20 @@ curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
 
 **Local LLM (Ollama):** `"model": "local:<ollama-tag>"` routet an `http://localhost:11434` (override via `OLLAMA_HOST`). `raw_cost_usd: 0`, kein Plan-Quota. Voraussetzung: Ollama läuft. Discovery der lokalen Modelle: `GET /api/llm/models?probe_ollama=1`.
 
-**Externes Backend – Klick (Jonas' Mac Studio):** `"model": "klick:best"` routet an `https://llm.your-klick.de` (Qwen3.6-35B Reasoning, MLX-quantisiert auf Apple Silicon). 4 Routing-Keys: `best` (default), `long-context` (große Kontextfenster), `fast` (low-latency), `small` (winzig & schnell). **Zählt NICHT gegen Jörgs Anthropic-Plan** — perfekt für brachiale Bulk-Verarbeitung oder wenn die `plan_usage_hint.recommendation` auf `tight`/`critical` springt. Wichtig: Qwen ist ein Reasoning-Modell (emittet `<think>…</think>`) — der Gateway filtert Tags automatisch + bumpt template-`max_tokens` auf `≥4096` (sonst frisst die reasoning-Phase alle Tokens und `text` kommt leer zurück). Latenz typisch 10-30s wegen Reasoning-Chain. `result.thinking` enthält die Reasoning-Spur für Debug.
+**Externes Backend – Klick (Jonas' Mac Studio):** `"model": "klick:best"` routet an `https://llm.your-klick.de` (Qwen3.6-35B Reasoning, MLX-quantisiert auf Apple Silicon). 4 Routing-Keys: `best` (default), `long-context`, `fast` (≈identisch zu best), `small`. **Zählt NICHT gegen Jörgs Anthropic-Plan** — perfekt für brachiale Bulk-Verarbeitung oder wenn die `plan_usage_hint.recommendation` auf `tight`/`critical` springt. Wichtig: Qwen ist ein Reasoning-Modell (emittet `<think>…</think>`) — der Gateway filtert Tags automatisch + bumpt template-`max_tokens` auf `≥4096` (sonst frisst die reasoning-Phase alle Tokens). Latenz typisch 10-30s wegen Reasoning-Chain. `result.thinking` enthält die Reasoning-Spur für Debug.
+
+**Auto-Routing der Templates:** drei Templates routen jetzt by-default auf Klick statt Anthropic (siehe `preferred_backend` in `GET /api/llm/templates`):
+- `commit-msg` → klick:best (deterministisch, hoher Volume)
+- `log-summary` → klick:best (Bulk-Job, latenz-tolerant)
+- `vendor-detect` → klick:best (Klassifikation = Qwens Stärke)
+
+Caller-`model` überschreibt das immer. Andere Templates (`german-ui`, `severity-triage`, `trivial-doc-edit`, `structured-extraction`) bleiben auf Anthropic (Stil/Reaktionszeit/Schema-Mode).
+
+**Fallback bei klick-Down:** wenn klick HTTP-5xx zurückgibt / Timeout / unreachable, fängt der Gateway automatisch Sonnet als Backup an. Response carries `fallback: {from, to, reason}` + Header `X-Fallback`. Caller können mit `"no_fallback": true` opt-out.
+
+**Shadow-Cost-Tracking:** klick-Calls bekommen ein `shadow_cost: {estimated_usd, substitute_for, breakdown}` Feld im Response — geschätzter Anthropic-Preis für dieselben Tokens. Im `/api/llm/stats` rollt das sich zu `totals.shadow_cost_usd` auf (= "so viel hätte Anthropic gekostet").
+
+**Auto-Discovery neuer Modelle:** der Hub polled jede externe Backend `/v1/models` alle 5min. Neue Modelle landen als `llm.discovery.added` Audit-Event im Activity-Feed (kein WA-Push, opt-in falls gewünscht). Status: `GET /api/llm/discovery` (oder `?run=1` für Force-Tick).
 
 **Templates (Quick Win):** statt jedesmal system+model+max_tokens zu schreiben, nimm ein vordefiniertes Template. `GET /api/llm/templates` listet sie. Aktuell verfügbar: `commit-msg`, `log-summary`, `german-ui`, `trivial-doc-edit`, `structured-extraction`, `vendor-detect`, `severity-triage`. Beispiel:
 ```bash
