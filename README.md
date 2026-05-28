@@ -63,7 +63,25 @@ bash ~/codex/agent-master/install.sh --uninstall
   ●  live in broker        ○  not running
 ```
 
-The top-right of the header has a **view toggle**: `🛰 Agenten` (the dashboard) and `🧩 Skills` (a browser for every installed Claude Code skill under `~/.claude/skills/`, grouped by cluster, with search + filter — useful when you want to remember what `/gsd-execute-phase` or `/chatgpt-image-restyle` actually does).
+The top-right of the header has a **view toggle**: `🛰 Agenten` (the dashboard), `🧩 Skills` (skill browser with usage heatmap) and `⚙️ Settings` (data-source management).
+
+### 🧩 Skills tab
+
+A browser for every installed Claude Code skill — both user-installed (`~/.claude/skills/`) and plugin-shipped (`~/.claude/plugins/cache/`). On a typical Jörg setup that's 80+ skills, so it does more than just list them:
+
+- **Stats strip** — used / brachliegend / 7d+30d invocation counts / top skill, fed live from InfluxDB.
+- **Per-card usage badge** — `52× · 7d:27` style; never-used skills get a dimmed `nie`.
+- **Heatmap tint** on the left border of each card, scaled to the current filter's max usage.
+- **Sub-groups** — 67 `gsd-*` skills aren't shown as one flat list; they're bucketed by the official `gsd-ns-*` namespaces (Workflow / Review / Ideate / Manage / Project / Context). 13 `browse:*` skills split into Drive / Capture / Prospect / Platform.
+- **Sort toggle:** `A–Z · Nutzung · Zuletzt`. The "Zuletzt" mode reveals a small activity feed above the grid showing the last 5 events (skill invocations + hub audit events, merged) — so you see what your sessions actually did in the past few minutes.
+- **★ Favorites** (localStorage) — always render in a leading section.
+- **Click a card** to open a modal with the full `SKILL.md` body, frontmatter meta, allowed-tools, plus a copy-`/command` button.
+
+### ⚙️ Settings tab
+
+- **InfluxDB sources** — list, add, edit, delete, set-default, test (probes `/health` + token + bucket). Tokens never leave the server — list responses are redacted to a `009811…db32` preview. Stored in `data/sources.json` (gitignored, chmod 600). One-time migration from a legacy `data/.influx-token` wraps the single-token setup into a default source.
+- **Peer briefing** — textarea bound to `data/peer-briefing.md`. The hub automatically pushes this onboarding text to every newly-spawned `claudepeers` session (background loop polls the broker every 30 s, dedups by `peer_id` in `data/briefed-peers.json`). Save + `Alle Peers re-briefen` button if you want existing live peers to see updated content. Each briefing send emits a `briefing.sent` audit event.
+- **Bisher gebriefte Peers** — list of every `peer_id` that's received a briefing, with timestamp + per-row Re-Brief button.
 
 - **Sidebar:** one button per agent, sorted alphabetically. Coloured dot = live state in the claude-peers broker (green = registered, grey = offline). Role label on the right (Hub/Bridge/Infra/Domain).
 - **Header:** Plan-% (the same data Claude Code's `/usage` slash command shows) combined with ccusage's API-equivalent cost, plus a live countdown until the 5h-block and weekly window reset.
@@ -123,7 +141,20 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/API.md`](docs/API.
 | `/api/plan-usage` | GET `?refresh=1` | Claude-Code plan %-utilization (5h + 7d, 5min cache) |
 | `/api/health` | GET `?refresh=1` | Parallel health-check pings (60s cache) |
 | `/api/events` | GET | **SSE stream** — `status` (3s), `usage` + `plan_usage` (5min) |
-| `/api/skills` | GET `?refresh=1` | All installed Claude Code skills (parsed from `~/.claude/skills/<name>/SKILL.md`), grouped by cluster. 5 min cached. |
+| `/api/skills` | GET `?refresh=1` | All installed Claude Code skills (parsed from `~/.claude/skills/*/SKILL.md` + `~/.claude/plugins/cache/<mp>/<plugin>/<ver>/skills/*/SKILL.md`), grouped by cluster + sub-group. 5 min cached. |
+| `/api/skills/body` | GET `?path=…` | Full `SKILL.md` body (post-frontmatter) for the detail modal. Path validated against the two trusted roots. |
+| `/api/skill-usage` | GET `?trigger=1` | Background-loop status (scans transcripts every 5 min, ships `skill_invocations` to InfluxDB). |
+| `/api/skill-usage/aggregated` | GET `?refresh=1` | Per-skill counts (total/7d/30d/last_used) + headline totals — feeds the Skills-tab heatmap. 60 s cached. |
+| `/api/recent-activity` | GET `?limit=N` | Merged feed of last `skill_invocations` + `hub_events`, normalized `{ts, kind, label, detail}`. 30 s cached. |
+| `/api/sources` | GET / POST | List configured data sources (tokens redacted) / create new source. |
+| `/api/sources/:id` | PATCH / DELETE | Update / delete one source. |
+| `/api/sources/:id/set-default` | POST | Promote one source to default for its type. |
+| `/api/sources/:id/test` | POST | Ping the source's `/health` endpoint + verify token + bucket. |
+| `/api/briefing` | GET / PUT | Get or update the auto-briefing text sent to new peers. |
+| `/api/briefing/rebrief` | POST `{peer_id?\|cwd?\|all?}` | Force re-send the briefing to one peer or all currently-online peers. |
+| `/api/wa-push` | GET / POST | Gateway status / push a WhatsApp message to Jörg via wa-bridge. Body: `{text, severity:info\|warn\|error\|recovered, source, dedup_key?, to_phone?}`. Dedup 10 min, rate-limit 30 / 5 min. |
+| `/api/health-monitor` | GET | Health-monitor loop state + per-box current issues. |
+| `/api/health-monitor/poll` | POST | Force an immediate health-monitor cycle. |
 | `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab. Auto-clones the repo via `gh` if `repo_url` is set in the registry and the local path is missing. |
 | `/api/stop` | POST `{agent:"<key>"}` | Hard-stop: SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
 | `/api/soft-stop` | POST `{agent:"<key>"}` | Soft-stop: channel-message the agent ("save & wrap up"), 5 min grace, then hard-stop. One `+5 min` extension available to the agent itself via `/api/soft-stop-extend`. |
@@ -186,6 +217,28 @@ The plan-% display comes from the **undocumented** `https://api.anthropic.com/ap
 If you're on Linux or your Claude Code installation uses a different credential store, the `/api/plan-usage` endpoint will fail gracefully and the UI shows ccusage-only.
 
 See [`docs/API.md`](docs/API.md#plan-usage-internals) for details.
+
+## Cross-repo observability (InfluxDB)
+
+The hub ships three measurement families to whichever InfluxDB source you've set as default in `data/sources.json`:
+
+| Measurement | Tags | Field | Written by |
+|---|---|---|---|
+| `skill_invocations` | `skill, project, session, branch` | `count=1i` | Background scanner that walks `~/.claude/projects/**/*.jsonl` every 5 min and ships every `Skill` tool_use event. Idempotent — timestamps are the original event time, re-running collapses by `(timestamp, tags)`. |
+| `hub_events` | `kind, target, actor, severity?` | `count=1i, msg="…"` | Audit trail for every hub action: source CRUD, briefing sends, spawn/stop success/fail, soft-stop, WA-push outcomes (`wa.push.sent / suppressed / rate_limited`), health alerts. |
+| `service_health` + `service_health_issues` | `agent, box, host, plugin, kind, reason, severity` | `ok_count, issue_count, worst_severity, severity_level` | Health-monitor loop polling per-box `/api/health/digest` endpoints declared in `registry.json:health_monitor`. Writes one summary point per box per tick + one event point per issue. |
+
+The Skills-tab heatmap and Activity-Feed read straight from these — no separate Grafana setup needed for the headline numbers. Build a dashboard with the same data if you want time-series graphs.
+
+### Auto-briefing for new peers
+
+Whenever a previously-unseen `peer_id` appears in the claude-peers broker, the hub sends it a one-time onboarding message containing operator identity, key conventions, pointers to global `CLAUDE.md` + memory, and the "WA-pushes are opt-in" rule. Content lives in `data/peer-briefing.md` (editable from the Settings tab). State persists in `data/briefed-peers.json` so a server restart doesn't re-spam everyone.
+
+### Central WA-push gateway
+
+`POST /api/wa-push` is the one place WhatsApp messages to the operator are sent from. Other repos (health-monitor alerts, build/deploy failures, etc.) call this instead of writing wa-bridge outbox files themselves. Dedup (10 min per `dedup_key`), rate-limit (30 per 5 min global), severity-rendering (`ℹ️ / ⚠️ / 🚨 / ✅` + `\n— <source>` footer), and audit logging all happen in one place.
+
+**WA-pushes are opt-in, not default.** The hub never automatically pushes "something changed" notifications. Sources have to be explicitly enabled per-target (e.g. `health_monitor.boxes[].wa_alerts: true`) — unsolicited information on Jörg's phone is the worst kind of noise.
 
 ## Manual install (without the script)
 
