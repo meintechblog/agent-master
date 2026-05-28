@@ -868,6 +868,10 @@ async function processBox(agentKey, agentConfig, box) {
   const tsNs = BigInt(Date.now()) * 1_000_000n;
   const lastState = healthState.boxes[box.label] || { issues: {} };
   const lastIssues = lastState.issues || {};
+  // First poll = no prior `last_polled_at`. We bootstrap state silently then,
+  // so existing ongoing issues don't all fire as "new" alerts at activation.
+  // Real transitions trigger from the 2nd poll onwards.
+  const isFirstPoll = !lastState.last_polled_at;
   const issues = Array.isArray(digest.issues) ? digest.issues : [];
   const currentKeys = new Set();
   const lines = []; // InfluxDB line-protocol points for this box
@@ -900,10 +904,12 @@ async function processBox(agentKey, agentConfig, box) {
       last_seen: now,
     };
 
-    // Alert conditions: new issue, OR escalation (warn→error).
+    // Alert conditions: new issue, OR escalation (warn→error). Skipped on
+    // the very first poll of a box — that one only bootstraps state so we
+    // don't dump every pre-existing issue as a fresh alert.
     const escalated = wasKnown && severityRank(sev) > severityRank(prev.severity);
     const isNew = !wasKnown;
-    if ((isNew || escalated) && meetsThreshold(sev, agentConfig.alert_threshold)) {
+    if (!isFirstPoll && (isNew || escalated) && meetsThreshold(sev, agentConfig.alert_threshold)) {
       alerts.push({
         kind: escalated ? "escalation" : "new_issue",
         text: `${box.label}/${iss.plugin || "?"}: ${iss.label || iss.id || "issue"} — ${iss.reason || sev}${iss.detail ? " (" + iss.detail + ")" : ""}`,
@@ -918,7 +924,9 @@ async function processBox(agentKey, agentConfig, box) {
   for (const oldKey of Object.keys(lastIssues)) {
     if (currentKeys.has(oldKey)) continue;
     const prev = lastIssues[oldKey];
-    if (meetsThreshold(prev.severity, agentConfig.alert_threshold)) {
+    // Recovered alerts also skipped on first poll (lastIssues was empty
+    // anyway so this branch wouldn't normally run, but be explicit).
+    if (!isFirstPoll && meetsThreshold(prev.severity, agentConfig.alert_threshold)) {
       alerts.push({
         kind: "recovered",
         text: `${box.label}/${prev.plugin || "?"}: ${prev.label || oldKey} wieder OK`,
