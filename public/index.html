@@ -1033,6 +1033,127 @@
     color: var(--accent);
     font-weight: 600;
   }
+
+  /* === Responsive breakpoints === */
+  /* Tablet / iPad portrait: 4-col grids collapse to 2, sidebar narrower. */
+  @media (max-width: 1024px) {
+    header {
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    header h1 { flex-basis: 100%; }
+    .layout {
+      grid-template-columns: 220px 1fr;
+    }
+    .skills-stats {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .skills-stats .stat-source {
+      grid-column: 1 / -1;
+      text-align: left;
+    }
+    .source-form {
+      grid-template-columns: 1fr;
+    }
+    .skills-grid,
+    .skill-group-grid {
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    }
+  }
+
+  /* Phone: single column everywhere, tables become stacked cards, larger
+     tap targets. Hub-UI is primarily desktop but Jörg checks from phone too. */
+  @media (max-width: 640px) {
+    body { padding: 0; }
+    header {
+      padding: 10px 12px;
+      gap: 8px;
+    }
+    header h1 { font-size: 16px; }
+    .view-toggle { width: 100%; }
+    .view-toggle .view-btn { flex: 1; text-align: center; padding: 6px 4px; font-size: 11px; }
+    .usage-bar, .usage-toggle, .stats { width: 100%; }
+    .layout {
+      grid-template-columns: 1fr;
+    }
+    nav.tabs { /* agent tabs sidebar — collapses to horizontal-scroll strip */
+      display: flex;
+      flex-direction: row;
+      overflow-x: auto;
+      padding: 6px;
+      gap: 6px;
+    }
+    nav.tabs > * { flex-shrink: 0; }
+
+    /* Skills toolbar: stack everything */
+    .skills-toolbar {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .skills-toolbar > * { width: 100%; }
+    .skills-clusters { justify-content: center; }
+    .sort-toggle { align-self: stretch; justify-content: center; }
+    #skills-search { min-width: 0; }
+
+    /* Stats 1-col */
+    .skills-stats { grid-template-columns: 1fr; gap: 8px; }
+    .stat-tile .stat-num { font-size: 18px; }
+
+    /* Skill cards: single column, smaller padding */
+    .skills-grid,
+    .skill-group-grid {
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    .skill-card { padding: 10px 12px; }
+    .skill-card .head { flex-wrap: wrap; gap: 5px; }
+
+    /* Modal full-screen on phone */
+    .modal-overlay { padding: 0; }
+    .modal { max-width: 100%; max-height: 100vh; border-radius: 0; border: none; }
+
+    /* Sources table → card-stack via display tricks. Each <tr> becomes a
+       vertical block, cells stack with their column header as a pseudo-label. */
+    .sources-table thead { display: none; }
+    .sources-table, .sources-table tbody, .sources-table tr, .sources-table td {
+      display: block;
+      width: 100%;
+    }
+    .sources-table tr {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      background: var(--panel-2);
+    }
+    .sources-table td {
+      border: none;
+      padding: 4px 0;
+    }
+    .sources-table .src-actions { justify-content: flex-start; }
+
+    /* Add-source form: full-width fields */
+    .source-form { grid-template-columns: 1fr; }
+    .source-form .form-actions { justify-content: stretch; }
+    .source-form .form-actions button { flex: 1; }
+
+    /* Activity row: stack icon+time on one line, label+detail below */
+    .activity-row {
+      grid-template-columns: 24px 1fr;
+      grid-template-areas: "icon time" "label label" "detail detail";
+      gap: 4px 10px;
+    }
+    .activity-row .ar-icon  { grid-area: icon; }
+    .activity-row .ar-time  { grid-area: time; text-align: left; }
+    .activity-row .ar-label { grid-area: label; padding-left: 34px; }
+    .activity-row .ar-detail{ grid-area: detail; padding-left: 34px; white-space: normal; }
+
+    /* Briefed-peers list rows */
+    .briefed-list .bl-row { grid-template-columns: 1fr; gap: 4px; padding: 10px 0; }
+    .briefing-editor textarea { min-height: 200px; font-size: 11px; }
+    .briefing-actions { flex-wrap: wrap; }
+    .briefing-actions .status { margin-left: 0; flex-basis: 100%; }
+  }
 </style>
 </head>
 <body>
