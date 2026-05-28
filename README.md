@@ -155,6 +155,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/API.md`](docs/API.
 | `/api/wa-push` | GET / POST | Gateway status / push a WhatsApp message to Jörg via wa-bridge. Body: `{text, severity:info\|warn\|error\|recovered, source, dedup_key?, to_phone?}`. Dedup 10 min, rate-limit 30 / 5 min. |
 | `/api/health-monitor` | GET | Health-monitor loop state + per-box current issues. |
 | `/api/health-monitor/poll` | POST | Force an immediate health-monitor cycle. |
+| `/api/agents/create` | POST `{name, mission}` | Scaffold a brand-new agent: creates `~/codex/<name>/` with `CLAUDE.md` + `.gitignore` + `git init` + initial commit, appends a registry entry with Domain-role defaults, then auto-spawns the new tab. `name` must be kebab-case (`^[a-z][a-z0-9-]*[a-z0-9]$`), `mission` 10–500 chars. Bound to the **+ Neuer Agent…** button at the end of the sidebar. |
 | `/api/spawn` | POST `{agent:"<key>"}` | Spawn a new claudepeers tab. Auto-clones the repo via `gh` if `repo_url` is set in the registry and the local path is missing. |
 | `/api/stop` | POST `{agent:"<key>"}` | Hard-stop: SIGTERM peer + parent (expect wrapper) + close its Terminal tab |
 | `/api/soft-stop` | POST `{agent:"<key>"}` | Soft-stop: channel-message the agent ("save & wrap up"), 5 min grace, then hard-stop. One `+5 min` extension available to the agent itself via `/api/soft-stop-extend`. |
@@ -176,6 +177,8 @@ Then it can message the new peer with `mcp__claude-peers__send_message`.
 ## Registry
 
 `data/registry.json` is the source of truth. See [`docs/REGISTRY.md`](docs/REGISTRY.md) for the schema. Edit and reload — the server re-reads on every API call (no restart needed).
+
+Alternatively, hit **+ Neuer Agent…** at the bottom of the sidebar (or `POST /api/agents/create`) to scaffold a fresh agent end-to-end: directory + `CLAUDE.md` + `git init` + initial commit + registry entry + auto-spawn into a new tab. GitHub repo creation is intentionally out of scope — the agent does that on demand once it has something worth publishing.
 
 Minimal entry:
 
