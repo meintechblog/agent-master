@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
+import crypto from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AGENT_HUB_PORT || "7890", 10);
@@ -36,6 +37,17 @@ const SKILL_USAGE_SCRIPT = path.join(__dirname, "scripts", "scan-skill-usage.mjs
 const SKILL_USAGE_LEGACY_TOKEN_FILE = path.join(__dirname, "data", ".influx-token");
 const SKILL_USAGE_POLL_MS = 5 * 60 * 1000;
 const SKILL_USAGE_LOOKBACK_MS = 6 * 60 * 1000;
+
+// --- WA-Push gateway ---
+// Central WhatsApp push endpoint that other repos (mqtt-master health alerts,
+// future energy/venusos alarms) call instead of writing wa-bridge outbox
+// files themselves. Keeps dedup, rate-limit, and rendering in one place.
+const WA_OUTBOX_DIR = path.join(process.env.HOME, "codex", "wa-bridge", "data", "outbox");
+const WA_DEFAULT_PHONE = "+PHONE-REDACTED";
+const WA_DEDUP_TTL_MS = 10 * 60 * 1000;
+const WA_RATE_LIMIT_COUNT = 30;
+const WA_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const WA_SEVERITY_PREFIX = { info: "ℹ️", warn: "⚠️", error: "🚨", recovered: "✅" };
 
 // --- Sources (InfluxDB and future others) ---
 // data/sources.json holds the user-managed list of data sources. Schema:
@@ -690,6 +702,80 @@ async function auditEvent(kind, tags = {}, msg = "") {
     .join(",");
   const line = `hub_events,${tagPairs} count=1i,msg=${escFieldString(msg || kind)} ${BigInt(Date.now()) * 1_000_000n}`;
   await writeInfluxLines([line]);
+}
+
+// === WA-Push gateway state ===
+//
+// In-memory dedup cache: dedup_key → expires_at_ms. `recovered` severity flushes
+// its key so the next warn/error after recovery goes through immediately.
+// Rate-limit: sliding window of recent push timestamps (global, all sources).
+const waDedupCache = new Map();
+const waRateWindow = [];
+
+function waDedupKeyFor(body) {
+  if (body.dedup_key) return String(body.dedup_key);
+  return crypto.createHash("sha1").update(`${body.source}|${body.text}`).digest("hex").slice(0, 16);
+}
+
+async function waPush(body) {
+  if (!body || typeof body.text !== "string" || !body.text.trim()) {
+    return { ok: false, error: "missing_text" };
+  }
+  if (!body.source || typeof body.source !== "string") {
+    return { ok: false, error: "missing_source", hint: "source identifies the caller, e.g. 'mqtt-master:hallbude'" };
+  }
+  const severity = body.severity || "info";
+  if (!Object.prototype.hasOwnProperty.call(WA_SEVERITY_PREFIX, severity)) {
+    return { ok: false, error: "invalid_severity", allowed: Object.keys(WA_SEVERITY_PREFIX) };
+  }
+  if (!existsSync(WA_OUTBOX_DIR)) {
+    return { ok: false, error: "outbox_not_found", path: WA_OUTBOX_DIR, hint: "wa-bridge not installed?" };
+  }
+
+  const now = Date.now();
+  const dedupKey = waDedupKeyFor(body);
+
+  // `recovered` clears the dedup so the next warn/error after recovery isn't suppressed.
+  if (severity === "recovered") waDedupCache.delete(dedupKey);
+
+  // Suppress repeats inside the dedup window.
+  if (waDedupCache.has(dedupKey)) {
+    const expires = waDedupCache.get(dedupKey);
+    if (expires > now) {
+      auditEvent("wa.push.suppressed", { source: body.source, severity }, `dup suppressed: ${body.text.slice(0, 60)}`).catch(() => {});
+      return { ok: true, msg_id: null, dedup: "suppressed", suppressed_for_ms: expires - now };
+    }
+    waDedupCache.delete(dedupKey);
+  }
+
+  // Sliding-window rate limit cleanup.
+  while (waRateWindow.length && waRateWindow[0] < now - WA_RATE_LIMIT_WINDOW_MS) waRateWindow.shift();
+  if (waRateWindow.length >= WA_RATE_LIMIT_COUNT) {
+    auditEvent("wa.push.rate_limited", { source: body.source }, `rate-limit hit: ${body.text.slice(0, 60)}`).catch(() => {});
+    return { ok: false, error: "rate_limited", retry_after_ms: WA_RATE_LIMIT_WINDOW_MS - (now - waRateWindow[0]) };
+  }
+
+  // Render + write outbox entry. wa-bridge picks .json files and renames to .sent after delivery.
+  const text = body.text.trim().slice(0, 300);
+  const rendered = `${WA_SEVERITY_PREFIX[severity]} ${text}\n— ${body.source}`;
+  const msgId = crypto.randomUUID();
+  const outboxPath = path.join(WA_OUTBOX_DIR, `${msgId}.json`);
+  const payload = {
+    sender_repo: "agent-master",
+    msg_type: "wa_reply",
+    to_e164: body.to_phone || WA_DEFAULT_PHONE,
+    body: rendered,
+  };
+  try {
+    await fs.writeFile(outboxPath, JSON.stringify(payload, null, 2));
+  } catch (err) {
+    return { ok: false, error: "outbox_write_failed", reason: err.message };
+  }
+  waDedupCache.set(dedupKey, now + WA_DEDUP_TTL_MS);
+  waRateWindow.push(now);
+
+  auditEvent("wa.push.sent", { source: body.source, severity, target: payload.to_e164 }, `WA → ${payload.to_e164}: ${text.slice(0, 60)}`).catch(() => {});
+  return { ok: true, msg_id: msgId, dedup: "sent" };
 }
 
 async function queryFlux(flux) {
@@ -1381,6 +1467,14 @@ async function handleApi(req, res, url) {
     res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(obj, null, 2));
   };
+  // Shared body-reader for any handler in this function that needs JSON
+  // (sources CRUD, wa-push, briefing PUT, etc.). Declared up-front so it's
+  // in scope no matter which endpoint matches first.
+  const readBody = async () => {
+    let raw = "";
+    for await (const c of req) raw += c;
+    try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
+  };
 
   // Self-describing API index — for agents that want to discover endpoints.
   if (req.method === "GET" && (url.pathname === "/api" || url.pathname === "/api/")) {
@@ -1422,6 +1516,8 @@ async function handleApi(req, res, url) {
         { method: "DELETE", path: "/api/sources/:id",       purpose: "delete source. cannot delete the default one if other sources exist." },
         { method: "POST",   path: "/api/sources/:id/set-default", purpose: "promote one source to default for its type" },
         { method: "POST",   path: "/api/sources/:id/test",  purpose: "ping the source's /health endpoint. Returns {ok, status, message}" },
+        { method: "GET",    path: "/api/wa-push",           purpose: "WA-push gateway status: outbox path, dedup cache, rate-limit window" },
+        { method: "POST",   path: "/api/wa-push",           purpose: "push a WhatsApp message to Jörg via wa-bridge. body: { text, severity:info|warn|error|recovered, source, dedup_key?, to_phone? }. Dedup 10min, rate-limit 30/5min." },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -1439,6 +1535,40 @@ async function handleApi(req, res, url) {
     return send(200, await getSkillUsageAggregated({ force }));
   }
 
+  // WA-Push gateway: POST sends a message via wa-bridge outbox; GET shows
+  // gateway state (dedup cache, rate-limit window, outbox path).
+  if (req.method === "GET" && url.pathname === "/api/wa-push") {
+    const now = Date.now();
+    while (waRateWindow.length && waRateWindow[0] < now - WA_RATE_LIMIT_WINDOW_MS) waRateWindow.shift();
+    return send(200, {
+      default_phone: WA_DEFAULT_PHONE,
+      outbox_dir: WA_OUTBOX_DIR,
+      outbox_exists: existsSync(WA_OUTBOX_DIR),
+      severity_prefixes: WA_SEVERITY_PREFIX,
+      dedup: {
+        ttl_ms: WA_DEDUP_TTL_MS,
+        active: [...waDedupCache.entries()]
+          .filter(([, exp]) => exp > now)
+          .map(([key, exp]) => ({ key, expires_in_ms: exp - now })),
+      },
+      rate_limit: {
+        window_ms: WA_RATE_LIMIT_WINDOW_MS,
+        max_per_window: WA_RATE_LIMIT_COUNT,
+        current_count: waRateWindow.length,
+      },
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/wa-push") {
+    const body = await readBody();
+    if (!body) return send(400, { error: "invalid_json" });
+    const result = await waPush(body);
+    if (!result.ok) {
+      if (result.error === "rate_limited") return send(429, result);
+      return send(400, result);
+    }
+    return send(200, result);
+  }
+
   // Recent-activity feed: last skill calls + hub audit events merged.
   if (req.method === "GET" && url.pathname === "/api/recent-activity") {
     const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10)));
@@ -1447,13 +1577,6 @@ async function handleApi(req, res, url) {
   }
 
   // === Sources CRUD ===
-  // Inline body-read helper (the file-scope readJson is declared later).
-  const readBody = async () => {
-    let raw = "";
-    for await (const c of req) raw += c;
-    try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
-  };
-
   if (req.method === "GET" && url.pathname === "/api/sources") {
     const cfg = await loadSources();
     return send(200, { sources: cfg.sources.map(redactSource) });
