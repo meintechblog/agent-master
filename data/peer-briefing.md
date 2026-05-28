@@ -67,6 +67,10 @@ Caller-`model` überschreibt das immer. Andere Templates (`german-ui`, `severity
 
 **Fallback bei klick-Down:** wenn klick HTTP-5xx zurückgibt / Timeout / unreachable, fängt der Gateway automatisch Sonnet als Backup an. Response carries `fallback: {from, to, reason}` + Header `X-Fallback`. Caller können mit `"no_fallback": true` opt-out.
 
+**Circuit Breaker:** nach 3 fails in 60s wird das Backend für 30s "open" → ALLE neuen Calls springen 0ms-fast direkt auf Sonnet, ohne klick anzurufen. Nach 30s probiert ein „half-open" Probe-Call ob klick wieder geht — wenn ja → CLOSED, sonst → wieder OPEN. Du siehst's an `fallback.circuit_open: true` und im Response-Body von `/api/llm/circuits`. Status auch direkt in `/api/llm/models`: `status: "ok"|"degraded"|"down"|"unknown"`. Operator-Overrides: `?force_close=klick` (sofort retry) / `?force_open=klick` (Maintenance-Mode). Audit-Events `circuit.opened` / `circuit.closed` im Activity-Feed.
+
+**Connect-Timeout-Strategie:** Stream-Endpoint hat 5s TTFB-Timeout (Header-Arrival), Non-Stream hat 60s Read-Timeout (LM Studio flusht Headers erst nach Inferenz). Heartbeat über `/v1/models` Discovery-Loop (3s) ist primäres "ist klick erreichbar?"-Signal.
+
 **Shadow-Cost-Tracking:** klick-Calls bekommen ein `shadow_cost: {estimated_usd, substitute_for, breakdown}` Feld im Response — geschätzter Anthropic-Preis für dieselben Tokens. Im `/api/llm/stats` rollt das sich zu `totals.shadow_cost_usd` auf (= "so viel hätte Anthropic gekostet").
 
 **Auto-Discovery neuer Modelle:** der Hub polled jede externe Backend `/v1/models` alle 5min. Neue Modelle landen als `llm.discovery.added` Audit-Event im Activity-Feed (kein WA-Push, opt-in falls gewünscht). Status: `GET /api/llm/discovery` (oder `?run=1` für Force-Tick).

@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
-import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels, getCacheStats as llmGetCacheStats, clearCache as llmClearCache } from "./lib/llm-gateway.mjs";
+import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels, getCacheStats as llmGetCacheStats, clearCache as llmClearCache, getCircuitStats as llmGetCircuitStats, forceCloseCircuit as llmForceCloseCircuit, forceOpenCircuit as llmForceOpenCircuit, setAuditSink as llmSetAuditSink } from "./lib/llm-gateway.mjs";
 import { listTemplates as llmListTemplates } from "./lib/llm-templates.mjs";
 
 // === LLM live-usage tracking (in-memory, for sidebar dots) ===
@@ -695,6 +695,15 @@ const externalDiscoveryState = {
   seen_models: new Map(),
 };
 
+// backend-heartbeat tracking: per-backend timestamps so the routing layer
+// and UI can see "klick was last reachable 8 minutes ago" without re-probing.
+// Updated by the discovery loop only — no extra network traffic.
+const backendHeartbeat = new Map();  // name → { last_successful_at, last_attempt_at, last_error, consecutive_failures }
+
+export function getBackendHeartbeat(name) {
+  return backendHeartbeat.get(name) || null;
+}
+
 async function discoverExternalModelsOnce() {
   const { loadExternalConfig: loadExt } = await import("./lib/llm-external.mjs");
   const cfg = await loadExt();
@@ -704,28 +713,35 @@ async function discoverExternalModelsOnce() {
     const url = `${backend.base_url.replace(/\/$/, "")}/v1/models`;
     const apiKey = backend.api_key || (backend.api_key_env && process.env[backend.api_key_env]);
     if (!apiKey) continue;
+    const hb = backendHeartbeat.get(name) || { last_successful_at: null, last_attempt_at: null, last_error: null, consecutive_failures: 0 };
+    hb.last_attempt_at = new Date().toISOString();
     try {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 5000);
+      // Same 3s connect-style timeout as the call path — discovery should
+      // declare a backend unreachable as fast as we'd declare a call dead.
+      const t = setTimeout(() => ctrl.abort(), 3000);
       const r = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, signal: ctrl.signal });
       clearTimeout(t);
       if (!r.ok) {
-        events.push({ backend: name, ok: false, reason: `HTTP ${r.status}` });
+        hb.last_error = `HTTP ${r.status}`;
+        hb.consecutive_failures += 1;
+        backendHeartbeat.set(name, hb);
+        events.push({ backend: name, ok: false, reason: hb.last_error });
         continue;
       }
       const j = await r.json();
+      hb.last_successful_at = new Date().toISOString();
+      hb.last_error = null;
+      hb.consecutive_failures = 0;
+      backendHeartbeat.set(name, hb);
       const live = new Set((j.data || []).map((m) => m.id).filter(Boolean));
       const known = externalDiscoveryState.seen_models.get(name) || new Set(backend.models || []);
       const added = [...live].filter((m) => !known.has(m));
       const removed = [...known].filter((m) => !live.has(m));
       externalDiscoveryState.seen_models.set(name, live);
-      // Compare against the BACKEND's persisted models list, not the in-memory
-      // diff — that way a model that was always there but never declared in the
-      // config still gets surfaced once on first sight.
       const declared = new Set(backend.models || []);
       const newlyVisible = [...live].filter((m) => !declared.has(m));
       events.push({ backend: name, ok: true, live: [...live], added, removed, newly_visible: newlyVisible });
-      // Fire audit events only for genuinely-new offerings since last poll.
       if (added.length) {
         await auditEvent("llm.discovery.added", { target: name }, `${name} exposes new models: ${added.join(", ")}`);
       }
@@ -733,6 +749,9 @@ async function discoverExternalModelsOnce() {
         await auditEvent("llm.discovery.removed", { target: name }, `${name} no longer exposes: ${removed.join(", ")}`);
       }
     } catch (e) {
+      hb.last_error = e.message;
+      hb.consecutive_failures += 1;
+      backendHeartbeat.set(name, hb);
       events.push({ backend: name, ok: false, reason: e.message });
     }
   }
@@ -2503,7 +2522,59 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/llm/models") {
     const probeOllama = url.searchParams.get("probe_ollama") === "1";
-    return send(200, await llmListModels(probeOllama));
+    const models = await llmListModels(probeOllama);
+    // Decorate external backends with circuit + heartbeat so callers see
+    // health in one call without hitting /api/llm/circuits separately.
+    const circuits = llmGetCircuitStats();
+    if (Array.isArray(models.external)) {
+      models.external = models.external.map((b) => {
+        const c = circuits[b.name];
+        const hb = backendHeartbeat.get(b.name);
+        const lastOkMs = hb?.last_successful_at ? Date.now() - new Date(hb.last_successful_at).getTime() : null;
+        // Status synthesizes circuit + heartbeat:
+        //   "down"      = circuit open OR heartbeat never succeeded
+        //   "degraded"  = closed but last heartbeat > 10min ago
+        //   "ok"        = closed and recent heartbeat (within 10min)
+        //   "unknown"   = no traffic and no heartbeat yet
+        let status = "unknown";
+        if (c?.state === "open") status = "down";
+        else if (lastOkMs == null) status = "unknown";
+        else if (lastOkMs > 10 * 60 * 1000) status = "degraded";
+        else status = "ok";
+        return { ...b, circuit: c?.state || "closed", status, last_successful_at: hb?.last_successful_at || null, consecutive_failures: hb?.consecutive_failures || 0 };
+      });
+    }
+    return send(200, models);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/llm/circuits") {
+    // Snapshot circuit-breaker state per backend, plus heartbeat from the
+    // discovery loop. ?force_close=<backend> / ?force_open=<backend> are
+    // operator overrides for "I fixed it, retry now" or "I'm taking this
+    // backend down for maintenance".
+    const fc = url.searchParams.get("force_close");
+    const fo = url.searchParams.get("force_open");
+    if (fc) {
+      const ok = llmForceCloseCircuit(fc);
+      auditEvent("circuit.force_closed", { target: fc }, `Operator force-closed circuit ${fc}`).catch(() => {});
+      return send(ok ? 200 : 404, { force_closed: fc, ok });
+    }
+    if (fo) {
+      const ok = llmForceOpenCircuit(fo);
+      auditEvent("circuit.force_opened", { target: fo }, `Operator force-opened circuit ${fo}`).catch(() => {});
+      return send(ok ? 200 : 404, { force_opened: fo, ok });
+    }
+    const circuits = llmGetCircuitStats();
+    // Merge with heartbeat for one-shot view.
+    const merged = {};
+    const names = new Set([...Object.keys(circuits), ...backendHeartbeat.keys()]);
+    for (const n of names) {
+      merged[n] = {
+        circuit: circuits[n] || { state: "closed", note: "no traffic yet" },
+        heartbeat: backendHeartbeat.get(n) || null,
+      };
+    }
+    return send(200, { backends: merged, generated_at: new Date().toISOString() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/llm/discovery") {
@@ -2882,4 +2953,6 @@ server.listen(PORT, "0.0.0.0", () => {
   startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
   startHealthMonitorLoop().catch((e) => console.warn("[health] start failed:", e.message));
   startExternalDiscoveryLoop().catch((e) => console.warn("[discovery] start failed:", e.message));
+  // Wire circuit-breaker state changes into the activity feed.
+  llmSetAuditSink((event, detail) => auditEvent(event, { target: "llm-gateway" }, detail));
 });
