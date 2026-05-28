@@ -12,6 +12,9 @@ data/health-state.json
 # Each user maintains their own.
 data/registry.json
 
+# External-LLM backend configs hold API keys — never commit.
+data/external-llm.json
+
 # Local artifacts
 node_modules/
 .DS_Store

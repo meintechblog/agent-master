@@ -56,6 +56,8 @@ curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
 
 **Local LLM (Ollama):** `"model": "local:<ollama-tag>"` routet an `http://localhost:11434` (override via `OLLAMA_HOST`). `raw_cost_usd: 0`, kein Plan-Quota. Voraussetzung: Ollama läuft. Discovery der lokalen Modelle: `GET /api/llm/models?probe_ollama=1`.
 
+**Externes Backend – Klick (Jonas' Mac Studio):** `"model": "klick:best"` routet an `https://llm.your-klick.de` (Qwen3.6-35B Reasoning, MLX-quantisiert auf Apple Silicon). 4 Routing-Keys: `best` (default), `long-context` (große Kontextfenster), `fast` (low-latency), `small` (winzig & schnell). **Zählt NICHT gegen Jörgs Anthropic-Plan** — perfekt für brachiale Bulk-Verarbeitung oder wenn die `plan_usage_hint.recommendation` auf `tight`/`critical` springt. Wichtig: Qwen ist ein Reasoning-Modell (emittet `<think>…</think>`) — der Gateway filtert Tags automatisch + bumpt template-`max_tokens` auf `≥4096` (sonst frisst die reasoning-Phase alle Tokens und `text` kommt leer zurück). Latenz typisch 10-30s wegen Reasoning-Chain. `result.thinking` enthält die Reasoning-Spur für Debug.
+
 **Templates (Quick Win):** statt jedesmal system+model+max_tokens zu schreiben, nimm ein vordefiniertes Template. `GET /api/llm/templates` listet sie. Aktuell verfügbar: `commit-msg`, `log-summary`, `german-ui`, `trivial-doc-edit`, `structured-extraction`, `vendor-detect`, `severity-triage`. Beispiel:
 ```bash
 curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
