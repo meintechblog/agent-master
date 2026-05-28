@@ -196,6 +196,47 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+  /* LLM live-usage indicator dots (right side of tab) */
+  .llm-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    margin-left: auto; flex-shrink: 0;
+    position: relative; cursor: help;
+    transition: transform 0.15s;
+  }
+  .llm-dot.model-sonnet { background: #8e44ad; box-shadow: 0 0 0 0 rgba(142, 68, 173, 0.6); }
+  .llm-dot.model-haiku  { background: #3498db; box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.6); }
+  .llm-dot.model-opus   { background: #e67e22; box-shadow: 0 0 0 0 rgba(230, 126, 34, 0.6); }
+  .llm-dot.live {
+    animation: llm-pulse 1.4s ease-out infinite;
+  }
+  .llm-dot.recent { opacity: 0.55; }
+  @keyframes llm-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(142, 68, 173, 0.7); transform: scale(1); }
+    70%  { box-shadow: 0 0 0 6px rgba(142, 68, 173, 0); transform: scale(1.15); }
+    100% { box-shadow: 0 0 0 0 rgba(142, 68, 173, 0); transform: scale(1); }
+  }
+  /* Custom tooltip rendered on hover (replaces native title= because that lags) */
+  .llm-tooltip {
+    position: fixed;
+    z-index: 5000;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text);
+    min-width: 200px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    opacity: 0; transition: opacity 0.1s;
+  }
+  .llm-tooltip.show { opacity: 1; }
+  .llm-tooltip .row { display: flex; justify-content: space-between; gap: 12px; }
+  .llm-tooltip .k { color: var(--text-dim); }
+  .llm-tooltip .v { color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .llm-tooltip .head { font-weight: 600; color: var(--accent); margin-bottom: 6px; font-size: 12px; }
+  .llm-tooltip .models { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
   nav.tabs button.tab-new:hover { color: var(--text); }
   nav.tabs button.tab-new .plus {
     display: inline-flex; align-items: center; justify-content: center;
@@ -1341,6 +1382,50 @@
 <script>
 let state = { agents: {}, online_count: 0, total_count: 0 };
 let healthData = { checks: {} };
+let llmLive = { now: 0, live_window_ms: 15000, recent_window_ms: 86400000, by_caller: {} };
+
+async function refreshLlmLive() {
+  try {
+    const r = await fetch("/api/llm/live");
+    llmLive = await r.json();
+    // Re-render tabs so new callers' dots appear + live/recent states refresh.
+    // renderTabs is cheap (just rebuilds the sidebar buttons) and preserves the
+    // active state.
+    if (typeof renderTabs === "function") renderTabs();
+  } catch {}
+}
+
+let llmTooltipEl = null;
+function showLlmTooltip(evt, caller) {
+  const usage = llmLive.by_caller?.[caller];
+  if (!usage) return;
+  if (!llmTooltipEl) {
+    llmTooltipEl = document.createElement("div");
+    llmTooltipEl.className = "llm-tooltip";
+    document.body.appendChild(llmTooltipEl);
+  }
+  const ageSec = Math.round((Date.now() - usage.last_call_at) / 1000);
+  const ageStr = ageSec < 60 ? `${ageSec}s ago` : ageSec < 3600 ? `${Math.round(ageSec/60)}min ago` : `${Math.round(ageSec/3600)}h ago`;
+  const avgLat = usage.latencies?.length ? Math.round(usage.latencies.reduce((a,b)=>a+b,0)/usage.latencies.length) : 0;
+  const fmtT = (n) => n >= 1000 ? (n/1000).toFixed(1) + "k" : Math.round(n);
+  const models = Object.entries(usage.by_model || {}).sort((a,b)=>b[1]-a[1]).map(([m,c]) => `<div class="row"><span class="k">${m}</span><span class="v">${c}× call${c===1?"":"s"}</span></div>`).join("");
+  llmTooltipEl.innerHTML = `
+    <div class="head">🧠 ${caller} → LLM Gateway</div>
+    <div class="row"><span class="k">calls (24h)</span><span class="v">${usage.calls}</span></div>
+    <div class="row"><span class="k">tokens</span><span class="v">${fmtT(usage.total_tokens)}</span></div>
+    <div class="row"><span class="k">last call</span><span class="v">${ageStr}</span></div>
+    <div class="row"><span class="k">last model</span><span class="v">${usage.last_call_model || "?"}</span></div>
+    <div class="row"><span class="k">avg latency</span><span class="v">${avgLat}ms</span></div>
+    <div class="models">${models}</div>
+  `;
+  const rect = evt.currentTarget.getBoundingClientRect();
+  llmTooltipEl.style.left = (rect.right + 8) + "px";
+  llmTooltipEl.style.top = (rect.top - 4) + "px";
+  llmTooltipEl.classList.add("show");
+}
+function hideLlmTooltip() {
+  if (llmTooltipEl) llmTooltipEl.classList.remove("show");
+}
 let usageData = null;
 let planUsageData = null;
 let active = null;
@@ -1578,10 +1663,23 @@ function renderTabs() {
   for (const [key, agent] of entries) {
     const btn = document.createElement("button");
     btn.className = "tab" + (active === key ? " active" : "");
+    const usage = llmLive.by_caller?.[key];
+    const now = llmLive.now || Date.now();
+    let dotHtml = "";
+    if (usage) {
+      const age = now - (usage.last_call_at || 0);
+      const live = age < (llmLive.live_window_ms || 15000);
+      const recent = !live && age < (llmLive.recent_window_ms || 86400000);
+      if (live || recent) {
+        const model = usage.last_call_model || "sonnet";
+        dotHtml = `<span class="llm-dot model-${model} ${live ? "live" : "recent"}" data-caller="${key}" onmouseenter="showLlmTooltip(event, '${key}')" onmouseleave="hideLlmTooltip()"></span>`;
+      }
+    }
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
       <span class="tab-role">${agent.role}</span>
+      ${dotHtml}
     `;
     btn.onclick = () => { active = key; render(); };
     tabs.appendChild(btn);
@@ -2569,10 +2667,13 @@ async function init() {
     active = live ? live[0] : Object.keys(state.agents)[0];
   } catch {}
   await refreshHealthInBackground();
+  await refreshLlmLive();
   render();
   connectSse();
   // refresh health every 5 min (it's cached server-side; client fetch triggers a soft refresh)
   setInterval(refreshHealthInBackground, 5 * 60 * 1000);
+  // LLM live usage every 5s — cheap in-memory endpoint, drives the per-tab dots
+  setInterval(refreshLlmLive, 5 * 1000);
   // re-render every minute to refresh the "letzte Aktualisierung" timestamp + sse age
   setInterval(render, 60 * 1000);
 }

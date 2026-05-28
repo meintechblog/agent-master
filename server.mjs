@@ -12,6 +12,35 @@ import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
 import { complete as llmComplete, listModels as llmListModels } from "./lib/llm-gateway.mjs";
 
+// === LLM live-usage tracking (in-memory, for sidebar dots) ===
+// Rolling 24h window. Updated on every /api/llm/complete call. Pruned on read.
+const LLM_LIVE_PULSE_MS = 15_000;     // "pulsing dot" if call happened within this
+const LLM_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;  // "recent activity" — static dot
+const llmUsageMap = new Map();        // caller → { calls, total_tokens, last_call_at, last_call_model, by_model, latencies }
+
+function bumpLlmUsage(caller, model, totalTokens, latencyMs) {
+  const now = Date.now();
+  const entry = llmUsageMap.get(caller) || {
+    calls: 0, total_tokens: 0, last_call_at: 0, last_call_model: null,
+    by_model: {}, latencies: [],
+  };
+  entry.calls += 1;
+  entry.total_tokens += totalTokens || 0;
+  entry.last_call_at = now;
+  entry.last_call_model = model;
+  entry.by_model[model] = (entry.by_model[model] || 0) + 1;
+  entry.latencies.push(latencyMs || 0);
+  if (entry.latencies.length > 20) entry.latencies = entry.latencies.slice(-20);  // rolling avg
+  llmUsageMap.set(caller, entry);
+}
+
+function pruneLlmUsage() {
+  const cutoff = Date.now() - LLM_RECENT_WINDOW_MS;
+  for (const [caller, entry] of llmUsageMap) {
+    if (entry.last_call_at < cutoff) llmUsageMap.delete(caller);
+  }
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AGENT_HUB_PORT || "7890", 10);
 const BROKER_URL = process.env.CLAUDE_PEERS_BROKER || "http://localhost:7899";
@@ -2294,12 +2323,26 @@ async function handleApi(req, res, url) {
     return send(200, llmListModels());
   }
 
+  if (req.method === "GET" && url.pathname === "/api/llm/live") {
+    // Cheap per-caller mini-stats for the sidebar dots. Built from the
+    // in-memory llmUsageMap that gets updated on every /api/llm/complete call.
+    pruneLlmUsage();
+    return send(200, {
+      now: Date.now(),
+      live_window_ms: LLM_LIVE_PULSE_MS,
+      recent_window_ms: LLM_RECENT_WINDOW_MS,
+      by_caller: Object.fromEntries(llmUsageMap),
+    });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/llm/complete") {
     const parsed = await readJson();
     if (!parsed) return send(400, { error: "invalid_json" });
     const caller = String(parsed.caller || "unknown").slice(0, 60);
     try {
       const result = await llmComplete(parsed);
+      // In-memory tracking for the sidebar live-dots (cheap, no influx roundtrip).
+      bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
       // Track: audit_event (for the activity feed) + dedicated influx measurement
       // for the LLM stats endpoint to query.
       auditEvent("llm.call", {
