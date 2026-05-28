@@ -463,6 +463,7 @@ async function briefPeer(peer, { force = false } = {}) {
     briefedPeers.set(peer.id, { cwd: peer.cwd, briefed_at: new Date().toISOString() });
     await saveBriefedPeers();
     console.log(`[briefing] briefed peer ${peer.id} (${peer.cwd})`);
+    auditEvent("briefing.sent", { target: peer.id, cwd: peer.cwd, forced: String(!!force) }, `Briefing → ${path.basename(peer.cwd || "?")}`).catch(() => {});
     return { sent: true };
   } catch (err) {
     console.warn(`[briefing] could not brief ${peer.id}:`, err.message);
@@ -648,6 +649,49 @@ function parseFluxCsv(text) {
   return out;
 }
 
+// Fire-and-forget audit writer. Used by hooks throughout the hub (source CRUD,
+// briefing sends, spawn/stop, etc.) to land a `hub_events` point in InfluxDB.
+// Failure is logged but never throws — auditing must not break the hub.
+function escFieldString(s) {
+  // InfluxDB line-protocol field strings: wrap in double quotes, escape \ and "
+  return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+function escTagValue(s) {
+  // Tag values can't contain ',', ' ', '=' unescaped.
+  return String(s).replace(/[ ,=]/g, "_");
+}
+
+async function writeInfluxLines(lines) {
+  if (!lines.length) return;
+  const token = await resolveInfluxToken();
+  if (!token) return; // dormant — sources not configured yet, drop quietly
+  const target = await resolveInfluxTarget();
+  const url = `${target.url}/api/v2/write?org=${encodeURIComponent(target.org)}&bucket=${encodeURIComponent(target.bucket)}&precision=ns`;
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Authorization": `Token ${token}`, "Content-Type": "text/plain; charset=utf-8" },
+      body: lines.join("\n"),
+    });
+    if (!r.ok) console.warn(`[audit] influx write ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  } catch (err) {
+    console.warn("[audit] influx write failed:", err.message);
+  }
+}
+
+// Build + ship one hub_events point. tags should be a plain object; msg is
+// an optional human-readable string stored as the `msg` field.
+async function auditEvent(kind, tags = {}, msg = "") {
+  const allTags = { kind, actor: "hub", ...tags };
+  const tagPairs = Object.entries(allTags)
+    .filter(([, v]) => v != null && v !== "")
+    .map(([k, v]) => `${k}=${escTagValue(v)}`)
+    .join(",");
+  const line = `hub_events,${tagPairs} count=1i,msg=${escFieldString(msg || kind)} ${BigInt(Date.now()) * 1_000_000n}`;
+  await writeInfluxLines([line]);
+}
+
 async function queryFlux(flux) {
   const token = await resolveInfluxToken();
   if (!token) throw new Error("no_influx_token");
@@ -719,6 +763,58 @@ async function getSkillUsageAggregated({ force = false } = {}) {
     generated_at: new Date().toISOString(),
   };
   skillUsageAggCache = { data, fetched_at: now, error: null };
+  return { ...data, cached: false, age_ms: 0 };
+}
+
+// === Recent-activity merge (skill_invocations + hub_events) ===
+//
+// Queries both measurements in parallel, normalizes to a common shape, and
+// returns the most-recent N events sorted desc by timestamp. Powers the
+// "letzte Änderungen" panel in the Skills tab when sort=recent.
+
+const RECENT_ACTIVITY_CACHE_MS = 30 * 1000;
+let recentActivityCache = { data: null, fetched_at: 0, limit: 0 };
+
+async function getRecentActivity({ limit = 10, force = false } = {}) {
+  const now = Date.now();
+  if (!force && recentActivityCache.data && recentActivityCache.limit >= limit &&
+      now - recentActivityCache.fetched_at < RECENT_ACTIVITY_CACHE_MS) {
+    return { ...recentActivityCache.data, events: recentActivityCache.data.events.slice(0, limit), cached: true, age_ms: now - recentActivityCache.fetched_at };
+  }
+  const target = await resolveInfluxTarget();
+  // Pull 3× the limit from each measurement so the merge has slack.
+  const sliceLimit = Math.max(limit * 3, 30);
+  const fluxSkills = `from(bucket:"${target.bucket}")
+  |> range(start:-7d)
+  |> filter(fn:(r)=>r._measurement=="skill_invocations" and r._field=="count")
+  |> keep(columns:["_time","skill","project"])
+  |> sort(columns:["_time"], desc:true)
+  |> limit(n:${sliceLimit})`;
+  const fluxEvents = `from(bucket:"${target.bucket}")
+  |> range(start:-7d)
+  |> filter(fn:(r)=>r._measurement=="hub_events" and r._field=="count")
+  |> keep(columns:["_time","kind","target","actor"])
+  |> sort(columns:["_time"], desc:true)
+  |> limit(n:${sliceLimit})`;
+  let skillRows = [], eventRows = [];
+  let err = null;
+  try {
+    [skillRows, eventRows] = await Promise.all([queryFlux(fluxSkills), queryFlux(fluxEvents)]);
+  } catch (e) {
+    err = e.message;
+  }
+  const events = [];
+  for (const r of skillRows) {
+    if (!r._time || !r.skill || r.skill === "__smoketest") continue;
+    events.push({ ts: r._time, kind: "skill", label: r.skill, detail: r.project || "" });
+  }
+  for (const r of eventRows) {
+    if (!r._time || !r.kind) continue;
+    events.push({ ts: r._time, kind: r.kind, label: r.target || "", detail: r.actor || "" });
+  }
+  events.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  const data = { events: events.slice(0, limit), counts: { skills: skillRows.length, events: eventRows.length }, error: err, generated_at: new Date().toISOString() };
+  recentActivityCache = { data, fetched_at: now, limit };
   return { ...data, cached: false, age_ms: 0 };
 }
 
@@ -1317,6 +1413,8 @@ async function handleApi(req, res, url) {
           query: { trigger: "1 to fire the scan once now (still respects --since-ms overlap)" } },
         { method: "GET",  path: "/api/skill-usage/aggregated", purpose: "per-skill counts (total/7d/30d/last_used) + headline totals — feeds the Skills-tab heatmap. Cached 60s.",
           query: { refresh: "1 to bypass the 60s cache" } },
+        { method: "GET",  path: "/api/recent-activity", purpose: "merged feed of last skill_invocations + hub_events, normalized {ts,kind,label,detail}. Cached 30s.",
+          query: { limit: "N events (default 10)", refresh: "1 to bypass cache" } },
         { method: "GET",    path: "/api/sources",           purpose: "list configured data sources (InfluxDB etc.); tokens redacted" },
         { method: "POST",   path: "/api/sources",           purpose: "create source. body: { name, type:'influxdb2', url, org, bucket, token, default? }" },
         { method: "PATCH",  path: "/api/sources/:id",       purpose: "update source. body subset of POST fields; omit token to keep current" },
@@ -1338,6 +1436,13 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/skill-usage/aggregated") {
     const force = url.searchParams.get("refresh") === "1";
     return send(200, await getSkillUsageAggregated({ force }));
+  }
+
+  // Recent-activity feed: last skill calls + hub audit events merged.
+  if (req.method === "GET" && url.pathname === "/api/recent-activity") {
+    const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10)));
+    const force = url.searchParams.get("refresh") === "1";
+    return send(200, await getRecentActivity({ limit, force }));
   }
 
   // === Sources CRUD ===
@@ -1378,6 +1483,7 @@ async function handleApi(req, res, url) {
     await saveSources();
     // Bust caches that depend on the source.
     skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+    auditEvent("source.create", { target: entry.id, source_type: entry.type, is_default: String(entry.default) }, `Source angelegt: ${entry.name}`).catch(() => {});
     return send(201, { source: redactSource(entry) });
   }
 
@@ -1394,16 +1500,19 @@ async function handleApi(req, res, url) {
     if (req.method === "PATCH" && !action) {
       const body = await readBody();
       if (!body) return send(400, { error: "invalid_json" });
+      const changed = [];
       for (const k of ["name","url","org","bucket"]) {
-        if (k in body && body[k] != null) src[k] = String(body[k]);
+        if (k in body && body[k] != null) { src[k] = String(body[k]); changed.push(k); }
       }
       if (body.url) src.url = src.url.replace(/\/+$/, "");
-      if (typeof body.token === "string" && body.token.trim()) src.token = body.token.trim();
+      if (typeof body.token === "string" && body.token.trim()) { src.token = body.token.trim(); changed.push("token"); }
       if (body.default === true) {
         for (const s of cfg.sources) if (s.type === src.type) s.default = (s.id === id);
+        changed.push("default");
       }
       await saveSources();
       skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      auditEvent("source.update", { target: id }, `Source aktualisiert (${changed.join(",") || "no-op"}): ${src.name}`).catch(() => {});
       return send(200, { source: redactSource(src) });
     }
 
@@ -1412,11 +1521,13 @@ async function handleApi(req, res, url) {
       if (src.default && sameType.length > 1) {
         return send(400, { error: "cannot_delete_default", hint: "promote another source first via POST /api/sources/:id/set-default" });
       }
+      const deletedName = src.name;
       cfg.sources.splice(idx, 1);
       // If we removed the only source of its type, nothing to repromote.
       // If we removed a non-default and other sources exist, default stays.
       await saveSources();
       skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      auditEvent("source.delete", { target: id }, `Source gelöscht: ${deletedName}`).catch(() => {});
       return send(200, { deleted: id });
     }
 
@@ -1424,6 +1535,7 @@ async function handleApi(req, res, url) {
       for (const s of cfg.sources) if (s.type === src.type) s.default = (s.id === id);
       await saveSources();
       skillUsageAggCache = { data: null, fetched_at: 0, error: null };
+      auditEvent("source.set_default", { target: id }, `Default-Source: ${src.name}`).catch(() => {});
       return send(200, { source: redactSource(src) });
     }
 
@@ -1447,8 +1559,10 @@ async function handleApi(req, res, url) {
           bucketMsg = e.message;
         }
       }
+      const overallOk = healthOk && (bucketOk === null || bucketOk);
+      auditEvent("source.test", { target: id, ok: String(overallOk) }, `Source-Test ${overallOk ? "OK" : "FAIL"}: ${src.name}`).catch(() => {});
       return send(200, {
-        ok: healthOk && (bucketOk === null || bucketOk),
+        ok: overallOk,
         health: { ok: healthOk, status: r1.status || 0, error: r1.errMsg || null },
         bucket: { ok: bucketOk, error: bucketMsg },
       });
@@ -1633,8 +1747,10 @@ async function handleApi(req, res, url) {
     try {
       const result = await spawnAgent(parsed.agent, registry);
       broadcastStatus();
+      auditEvent("spawn.success", { target: parsed.agent }, `Spawn: ${parsed.agent}`).catch(() => {});
       return send(200, { ok: true, ...result });
     } catch (e) {
+      auditEvent("spawn.fail", { target: parsed.agent }, `Spawn FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
       return send(500, { error: "spawn_failed", reason: String(e.message) });
     }
   }
@@ -1653,8 +1769,10 @@ async function handleApi(req, res, url) {
         persistSoftStopState();
       }
       broadcastStatus();
+      auditEvent("stop.success", { target: parsed.agent }, `Stop: ${parsed.agent}`).catch(() => {});
       return send(200, result);
     } catch (e) {
+      auditEvent("stop.fail", { target: parsed.agent }, `Stop FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
       return send(500, { error: "stop_failed", reason: String(e.message) });
     }
   }
@@ -1668,6 +1786,7 @@ async function handleApi(req, res, url) {
     try {
       const result = await softStopAgent(parsed.agent, registry);
       broadcastStatus();
+      auditEvent("soft_stop.start", { target: parsed.agent }, `Soft-Stop angefordert: ${parsed.agent}`).catch(() => {});
       return send(200, result);
     } catch (e) {
       return send(500, { error: "soft_stop_failed", reason: String(e.message) });

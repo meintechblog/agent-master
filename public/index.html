@@ -464,6 +464,83 @@
   .skill-card.heat-5 { border-left: 3px solid rgba(108, 92, 231, 1); }
   .skill-card.heat-0 { border-left: 3px solid rgba(139, 139, 154, 0.15); }
 
+  /* Activity feed shown above skills when sort=recent */
+  .activity-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+  }
+  .activity-panel .ap-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .activity-panel .ap-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text);
+    font-weight: 700;
+  }
+  .activity-panel .ap-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .activity-panel .ap-refresh {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .activity-panel .ap-refresh:hover { color: var(--text); border-color: var(--text-dim); }
+  .activity-row {
+    display: grid;
+    grid-template-columns: 24px 70px 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+    border-top: 1px solid rgba(255,255,255,0.04);
+    font-size: 12px;
+  }
+  .activity-row:first-of-type { border-top: none; }
+  .activity-row .ar-icon { font-size: 14px; text-align: center; }
+  .activity-row .ar-time {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .activity-row .ar-label {
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    word-break: break-all;
+  }
+  .activity-row .ar-label .ar-kind {
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-right: 6px;
+  }
+  .activity-row .ar-detail {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: nowrap;
+  }
+  .activity-row.kind-skill .ar-label { color: var(--accent); }
+  .activity-row.kind-source .ar-label { color: var(--green); }
+  .activity-row.kind-briefing .ar-label { color: var(--yellow); }
+  .activity-row.kind-spawn .ar-label { color: var(--green); }
+  .activity-row.kind-stop .ar-label { color: var(--orange); }
+
   /* === Settings view === */
   .settings-section {
     background: var(--panel);
@@ -914,6 +991,7 @@
 </div>
 
 <section id="skills-view" style="display:none">
+  <div class="activity-panel" id="activity-panel" style="display:none"></div>
   <div class="skills-stats" id="skills-stats"></div>
   <div class="skills-toolbar">
     <input type="text" id="skills-search" placeholder="Suche (Name oder Description)…" oninput="renderSkills()">
@@ -1526,6 +1604,109 @@ function setSkillsSort(s) {
     b.classList.toggle("active", b.dataset.sort === s);
   });
   renderSkills();
+  // Activity panel only makes sense in "recent" mode — show + refresh, else hide.
+  const panel = document.getElementById("activity-panel");
+  if (s === "recent") {
+    panel.style.display = "";
+    loadActivity();
+    startActivityAutoRefresh();
+  } else {
+    panel.style.display = "none";
+    stopActivityAutoRefresh();
+  }
+}
+
+// === Activity panel (recent skill calls + hub audit events) ===
+
+let activityTimer = null;
+let activityData = null;
+
+function startActivityAutoRefresh() {
+  stopActivityAutoRefresh();
+  activityTimer = setInterval(() => {
+    if (view === "skills" && skillsSort === "recent" && document.visibilityState === "visible") {
+      loadActivity();
+    }
+  }, 60_000);
+}
+function stopActivityAutoRefresh() {
+  if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+}
+
+async function loadActivity(force) {
+  const panel = document.getElementById("activity-panel");
+  if (!panel) return;
+  if (!activityData) panel.innerHTML = `<div class="empty-tip" style="padding:8px">Lade Aktivität…</div>`;
+  try {
+    const r = await fetch("/api/recent-activity?limit=5" + (force ? "&refresh=1" : ""));
+    activityData = await r.json();
+    renderActivity();
+  } catch (e) {
+    panel.innerHTML = `<div class="empty-tip" style="color:var(--red)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+const ACTIVITY_KIND_META = {
+  "skill":             { icon: "🧩", group: "skill",    label: "Skill" },
+  "source.create":     { icon: "📡", group: "source",   label: "Source +" },
+  "source.update":     { icon: "📡", group: "source",   label: "Source ✎" },
+  "source.delete":     { icon: "📡", group: "source",   label: "Source 🗑" },
+  "source.set_default":{ icon: "★",  group: "source",   label: "Source ★" },
+  "source.test":       { icon: "⚡", group: "source",   label: "Source ⚡" },
+  "briefing.sent":     { icon: "👋", group: "briefing", label: "Briefing" },
+  "spawn.success":     { icon: "🚀", group: "spawn",    label: "Spawn" },
+  "spawn.fail":        { icon: "💥", group: "spawn",    label: "Spawn FAIL" },
+  "stop.success":      { icon: "⏹",  group: "stop",     label: "Stop" },
+  "stop.fail":         { icon: "💥", group: "stop",     label: "Stop FAIL" },
+  "soft_stop.start":   { icon: "🛑", group: "stop",     label: "Soft-Stop" },
+};
+
+function fmtTimeAgo(iso) {
+  const t = new Date(iso).getTime();
+  if (!t) return "?";
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (diffSec < 60)        return `vor ${diffSec}s`;
+  if (diffSec < 3600)      return `vor ${Math.floor(diffSec / 60)}m`;
+  if (diffSec < 86400)     return `vor ${Math.floor(diffSec / 3600)}h`;
+  if (diffSec < 86400 * 7) return `vor ${Math.floor(diffSec / 86400)}d`;
+  return new Date(iso).toISOString().slice(0, 10);
+}
+
+function renderActivity() {
+  const panel = document.getElementById("activity-panel");
+  if (!panel || !activityData) return;
+  if (activityData.error) {
+    panel.innerHTML = `<div class="empty-tip" style="color:var(--orange)">InfluxDB: ${escapeHtml(activityData.error)}</div>`;
+    return;
+  }
+  const events = activityData.events || [];
+  if (!events.length) {
+    panel.innerHTML = `<div class="ap-head">
+      <span class="ap-title">📋 Letzte Aktivität</span>
+      <span class="ap-sub">noch keine Events in den letzten 7 Tagen</span>
+    </div>`;
+    return;
+  }
+  const rows = events.map((e) => {
+    const meta = ACTIVITY_KIND_META[e.kind] || { icon: "•", group: "other", label: e.kind };
+    const labelHtml = e.kind === "skill"
+      ? `<span class="ar-kind">${meta.label}</span>${escapeHtml(e.label)}`
+      : `<span class="ar-kind">${escapeHtml(meta.label)}</span>${escapeHtml(e.label)}`;
+    return `<div class="activity-row kind-${meta.group}">
+      <span class="ar-icon">${meta.icon}</span>
+      <span class="ar-time" title="${escapeHtml(e.ts)}">${fmtTimeAgo(e.ts)}</span>
+      <span class="ar-label">${labelHtml}</span>
+      <span class="ar-detail">${e.detail ? escapeHtml(e.detail) : ""}</span>
+    </div>`;
+  }).join("");
+  const subInfo = `${events.length} Events · ${activityData.counts?.skills || 0} Skills + ${activityData.counts?.events || 0} Hub-Events letzte 7d${activityData.cached ? " · cached " + Math.round(activityData.age_ms / 1000) + "s" : ""}`;
+  panel.innerHTML = `
+    <div class="ap-head">
+      <span class="ap-title">📋 Letzte Aktivität</span>
+      <span class="ap-sub">${subInfo}</span>
+      <button class="ap-refresh" onclick="loadActivity(true)" title="Cache umgehen">⟳</button>
+    </div>
+    ${rows}`;
 }
 
 // Pick a heat bucket 0–5 based on a skill's total usage relative to the
