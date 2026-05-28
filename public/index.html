@@ -1107,6 +1107,36 @@
     font-size: 13px;
   }
   .deploy-grid .k { color: var(--text-dim); }
+  /* ── Usage matrix ── */
+  #usage-view { padding: 24px 28px; max-width: 1180px; margin: 0 auto; }
+  .usage-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; }
+  .usage-title { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .usage-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .usage-check { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .usage-check input { width: auto; }
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg-btn { background: none; border: none; color: var(--text-dim); padding: 6px 14px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s; }
+  .seg-btn.active { background: var(--accent); color: #fff; }
+  .usage-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .kpi .kpi-v { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .kpi .kpi-l { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  .matrix-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  table.matrix { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.matrix th, table.matrix td { padding: 9px 12px; text-align: right; white-space: nowrap; }
+  table.matrix thead th { background: var(--panel); color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; border-bottom: 1px solid var(--border); }
+  table.matrix th.agent-col, table.matrix td.agent-col { text-align: left; position: sticky; left: 0; background: var(--panel); font-weight: 500; z-index: 1; }
+  table.matrix tbody td.agent-col { color: var(--text); border-right: 1px solid var(--border); }
+  table.matrix tbody tr:nth-child(even) td.agent-col { background: #1e1e29; }
+  table.matrix .cell { position: relative; font-variant-numeric: tabular-nums; }
+  table.matrix .cell.empty { color: #3a3a48; }
+  table.matrix .cell .sub { display: block; font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+  table.matrix tfoot td { border-top: 2px solid var(--border); font-weight: 600; background: var(--panel); }
+  table.matrix tfoot td.agent-col { color: var(--text-dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
+  .model-pill { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .mp-claude { background: rgba(108,92,231,0.18); color: #a99bff; }
+  .mp-klick  { background: rgba(0,184,148,0.16); color: #4fd6b0; }
+  .usage-note { font-size: 11px; color: var(--text-dim); font-style: italic; margin-top: 14px; line-height: 1.5; }
   .health-led {
     display: inline-block;
     width: 10px;
@@ -1260,6 +1290,7 @@
   <div class="view-toggle">
     <button class="view-btn active" id="view-agents"   onclick="switchView('agents')">🛰 Agenten</button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
+    <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
   </div>
   <div class="sse-pill" id="sse-pill">connecting…</div>
@@ -1352,6 +1383,25 @@
     <div class="section-hint">Jeder peer_id der schon ein Briefing bekommen hat. Re-briefen erzwingt einen erneuten Push (z. B. nach Edit oben).</div>
     <div id="briefed-list-wrap"><div class="empty-tip">Lade…</div></div>
   </div>
+</section>
+
+<section id="usage-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">LLM-Gateway · Nutzungsmatrix</h2>
+      <div class="section-hint">Tokens pro Agent × Modell. Zellen-Helligkeit ∝ Token-Anteil. Quelle: InfluxDB <code>llm_call</code>.</div>
+    </div>
+    <div class="usage-controls">
+      <div class="seg" id="usage-range">
+        <button class="seg-btn active" data-range="last_24h" onclick="setUsageRange('last_24h')">24 h</button>
+        <button class="seg-btn"        data-range="last_7d"  onclick="setUsageRange('last_7d')">7 Tage</button>
+      </div>
+      <label class="usage-check"><input type="checkbox" id="usage-hide-tests" checked onchange="renderUsageMatrix()"> Test-Caller (<code>hub-*</code>) ausblenden</label>
+      <button class="btn btn-secondary" onclick="loadUsageMatrix()">⟳</button>
+    </div>
+  </div>
+  <div id="usage-kpis" class="usage-kpis"></div>
+  <div id="usage-matrix-wrap"><div class="empty-tip">Lade Matrix…</div></div>
 </section>
 
 <!-- Skill detail modal -->
@@ -2004,6 +2054,103 @@ async function loadLlmStats() {
   }
 }
 
+// ── Usage matrix (Agent × Modell) ──
+let usageStatsData = null;
+let usageRange = "last_24h";
+
+async function loadUsageMatrix() {
+  const wrap = document.getElementById("usage-matrix-wrap");
+  if (wrap && !usageStatsData) wrap.innerHTML = `<div class="empty-tip">Lade Matrix…</div>`;
+  try {
+    const r = await fetch("/api/llm/stats");
+    usageStatsData = await r.json();
+    renderUsageMatrix();
+  } catch (e) {
+    if (wrap) wrap.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+function setUsageRange(r) {
+  usageRange = r;
+  document.querySelectorAll("#usage-range .seg-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.range === r));
+  renderUsageMatrix();
+}
+
+function fmtTok(n) {
+  if (!n) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(Math.round(n));
+}
+function fmtUsd(n) { return "$" + (n || 0).toFixed(n && n < 0.01 ? 4 : 2); }
+function modelFamily(m) { return m.startsWith("klick") ? "klick" : "claude"; }
+
+function renderUsageMatrix() {
+  const wrap = document.getElementById("usage-matrix-wrap");
+  const kpiBox = document.getElementById("usage-kpis");
+  if (!wrap || !usageStatsData) return;
+  const w = usageStatsData[usageRange] || {};
+  if (w.error) { wrap.innerHTML = `<div class="empty-tip" style="color:var(--red)">${w.error}</div>`; kpiBox.innerHTML = ""; return; }
+  const matrix = w.matrix || {};
+  const hideTests = document.getElementById("usage-hide-tests")?.checked;
+
+  // Rows = callers (optionally hide hub-* test callers), sorted by row-total tokens desc.
+  let callers = Object.keys(matrix).filter((c) => !(hideTests && c.startsWith("hub-")));
+  const rowTotal = (c) => Object.values(matrix[c]).reduce((s, v) => s + (v.total_tokens || 0), 0);
+  callers.sort((a, b) => rowTotal(b) - rowTotal(a));
+
+  // Columns = union of models present in the visible rows, sorted by column-total desc.
+  const colTotals = {};
+  for (const c of callers) for (const [m, v] of Object.entries(matrix[c])) colTotals[m] = (colTotals[m] || 0) + (v.total_tokens || 0);
+  const models = Object.keys(colTotals).sort((a, b) => colTotals[b] - colTotals[a]);
+
+  if (!callers.length || !models.length) {
+    wrap.innerHTML = `<div class="empty-tip">Keine Daten im Zeitfenster${hideTests ? " (Test-Caller sind ausgeblendet)" : ""}.</div>`;
+    kpiBox.innerHTML = "";
+    return;
+  }
+
+  // Heatmap intensity relative to the largest single cell (sqrt for perceptual spread).
+  let maxCell = 0;
+  for (const c of callers) for (const m of models) maxCell = Math.max(maxCell, matrix[c][m]?.total_tokens || 0);
+  const cellBg = (tok, fam) => {
+    if (!tok) return "transparent";
+    const a = 0.08 + 0.55 * Math.sqrt(tok / maxCell);
+    return fam === "klick" ? `rgba(0,184,148,${a.toFixed(3)})` : `rgba(108,92,231,${a.toFixed(3)})`;
+  };
+
+  // KPIs from the window totals + visible-row aggregates.
+  const t = w.totals || {};
+  const visTokens = callers.reduce((s, c) => s + rowTotal(c), 0);
+  const visCost = callers.reduce((s, c) => s + Object.values(matrix[c]).reduce((q, v) => q + (v.raw_cost_usd || 0), 0), 0);
+  const visShadow = callers.reduce((s, c) => s + Object.values(matrix[c]).reduce((q, v) => q + (v.shadow_cost_usd || 0), 0), 0);
+  kpiBox.innerHTML = [
+    [fmtTok(visTokens), "Tokens (sichtbar)"],
+    [fmtUsd(visCost), "API-äquiv. Kosten"],
+    [fmtUsd(visShadow), "Shadow-Kosten (klick)"],
+    [String(callers.length), "Agenten"],
+    [String(models.length), "Modelle"],
+    [(t.avg_latency_ms || 0) + " ms", "Ø Latenz"],
+  ].map(([v, l]) => `<div class="kpi"><div class="kpi-v">${v}</div><div class="kpi-l">${l}</div></div>`).join("");
+
+  const pill = (m) => `<span class="model-pill ${modelFamily(m) === "klick" ? "mp-klick" : "mp-claude"}">${m}</span>`;
+  const head = `<tr><th class="agent-col">Agent</th>${models.map((m) => `<th>${pill(m)}</th>`).join("")}<th>Σ</th></tr>`;
+  const body = callers.map((c) => {
+    const cells = models.map((m) => {
+      const v = matrix[c][m];
+      const tok = v?.total_tokens || 0;
+      if (!tok) return `<td class="cell empty">·</td>`;
+      return `<td class="cell" style="background:${cellBg(tok, modelFamily(m))}" title="${c} · ${m}\n${Math.round(tok).toLocaleString("de-DE")} tokens · ${fmtUsd(v.raw_cost_usd)}">${fmtTok(tok)}<span class="sub">${fmtUsd(v.raw_cost_usd)}</span></td>`;
+    }).join("");
+    return `<tr><td class="agent-col">${c}</td>${cells}<td class="cell"><strong>${fmtTok(rowTotal(c))}</strong></td></tr>`;
+  }).join("");
+  const foot = `<tr><td class="agent-col">Σ Modell</td>${models.map((m) => `<td class="cell"><strong>${fmtTok(colTotals[m])}</strong></td>`).join("")}<td class="cell"><strong>${fmtTok(visTokens)}</strong></td></tr>`;
+
+  wrap.innerHTML = `<div class="matrix-scroll"><table class="matrix"><thead>${head}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>`
+    + `<div class="usage-note">${usageStatsData.note || ""}</div>`;
+}
+
 async function handleSpawn(key) {
   const main = document.getElementById("content");
   main.innerHTML = `<div class="empty-tip">⚡ Spawne ${key}… (~15s inkl. Dialog-Dismiss)</div>`;
@@ -2087,14 +2234,16 @@ async function refreshHealthInBackground() {
 
 function switchView(v) {
   view = v;
-  for (const k of ["agents", "skills", "settings"]) {
+  for (const k of ["agents", "skills", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
   document.getElementById("agents-layout").style.display   = v === "agents"   ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
+  document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
+  if (v === "usage")    loadUsageMatrix();
   if (v === "settings") { loadSources(); loadBriefing(); }
 }
 

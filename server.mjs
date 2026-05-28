@@ -2749,6 +2749,11 @@ async function handleApi(req, res, url) {
         const totals = { calls: 0, total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, avg_latency_ms: 0 };
         const byModel = {};
         const byCaller = {};
+        // matrix[caller][model] = { total_tokens, output_tokens, raw_cost_usd, shadow_cost_usd }
+        // Built from the SAME (model,caller,_field) grouped rows — the cross product
+        // is already in the data, we just keep it instead of collapsing both axes.
+        const matrix = {};
+        const blankCell = () => ({ total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0 });
         let latencyN = 0;
         for (const r of rows) {
           const field = r._field;
@@ -2758,24 +2763,31 @@ async function handleApi(req, res, url) {
           const caller = r.caller || "?";
           byModel[model] = byModel[model] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, calls: 0 };
           byCaller[caller] = byCaller[caller] || { total_tokens: 0, output_tokens: 0, raw_cost_usd: 0, shadow_cost_usd: 0, calls: 0 };
+          matrix[caller] = matrix[caller] || {};
+          matrix[caller][model] = matrix[caller][model] || blankCell();
+          const cell = matrix[caller][model];
           if (field === "total_tokens") {
             totals.total_tokens += value;
             byModel[model].total_tokens += value;
             byCaller[caller].total_tokens += value;
+            cell.total_tokens += value;
           } else if (field === "output_tokens") {
             totals.output_tokens += value;
             byModel[model].output_tokens += value;
             byCaller[caller].output_tokens += value;
+            cell.output_tokens += value;
             // We use output_tokens as the call counter — each call produces exactly one output_tokens row.
             // (sum() over per-call rows gives the right total tokens, not call count, so count separately.)
           } else if (field === "raw_cost_usd") {
             totals.raw_cost_usd += value;
             byModel[model].raw_cost_usd += value;
             byCaller[caller].raw_cost_usd += value;
+            cell.raw_cost_usd += value;
           } else if (field === "shadow_cost_usd") {
             totals.shadow_cost_usd += value;
             byModel[model].shadow_cost_usd += value;
             byCaller[caller].shadow_cost_usd += value;
+            cell.shadow_cost_usd += value;
           } else if (field === "latency_ms") {
             totals.avg_latency_ms += value;
             latencyN += 1;
@@ -2787,7 +2799,7 @@ async function handleApi(req, res, url) {
         // by_model/by_caller need call-counts too — derive from output_tokens row count would need raw rows.
         // Cheap heuristic: each call writes one row per field, so number of rows in a group / 4 fields = calls.
         // We don't have that directly here; leave .calls=0 in subgroups for now.
-        return { totals, by_model: byModel, by_caller: byCaller };
+        return { totals, by_model: byModel, by_caller: byCaller, matrix };
       };
       const [r24, r7d] = await Promise.all([
         queryFlux(buildQ("-24h")).catch((e) => ({ error: String(e.message) })),
