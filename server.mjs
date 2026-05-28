@@ -38,6 +38,16 @@ const SKILL_USAGE_LEGACY_TOKEN_FILE = path.join(__dirname, "data", ".influx-toke
 const SKILL_USAGE_POLL_MS = 5 * 60 * 1000;
 const SKILL_USAGE_LOOKBACK_MS = 6 * 60 * 1000;
 
+// --- Health monitor ---
+// Polls per-box /api/health/digest endpoints declared in agents' health_monitor
+// config (registry.json). Detects transitions, writes time-series to InfluxDB
+// (measurement: service_health), and forwards alerts through the WA-push
+// gateway. Dormant when no agent has health_monitor.enabled=true with boxes.
+const HEALTH_STATE_PATH = path.join(__dirname, "data", "health-state.json");
+const HEALTH_POLL_MS = 60 * 1000;
+const HEALTH_FETCH_TIMEOUT_MS = 10 * 1000;
+const HEALTH_SEVERITY_RANK = { ok: 0, info: 0, warn: 1, error: 2 };
+
 // --- WA-Push gateway ---
 // Central WhatsApp push endpoint that other repos (mqtt-master health alerts,
 // future energy/venusos alarms) call instead of writing wa-bridge outbox
@@ -776,6 +786,228 @@ async function waPush(body) {
 
   auditEvent("wa.push.sent", { source: body.source, severity, target: payload.to_e164 }, `WA → ${payload.to_e164}: ${text.slice(0, 60)}`).catch(() => {});
   return { ok: true, msg_id: msgId, dedup: "sent" };
+}
+
+// === Health monitor ===
+//
+// Iterates over registry agents that declare a `health_monitor` block:
+//   "health_monitor": {
+//     "enabled": true,
+//     "alert_threshold": "warn",     // alert on this severity or worse
+//     "boxes": [
+//       { "label": "hallbude", "url": "http://192.168.3.213/api/health/digest",
+//         "enabled": true },
+//       { "label": "lulubude", "url": "http://172.25.0.85/api/health/digest",
+//         "enabled": false }
+//     ]
+//   }
+// For each enabled box: fetch the digest, compare against last-known issues
+// (keyed by `kind:plugin:id:reason`), write time-series + emit WA alerts on
+// new/escalated issues and recovered events. State survives restarts via
+// data/health-state.json.
+
+let healthState = { boxes: {} }; // boxLabel → { last_polled_at, last_ok_count, issues: {key: {severity,label,reason,plugin,first_seen,last_seen}} }
+let healthMonitorState = { last_run_at: null, last_summary: null, last_error: null, polled: 0, alerts_sent: 0 };
+
+async function loadHealthState() {
+  if (!existsSync(HEALTH_STATE_PATH)) return;
+  try {
+    healthState = JSON.parse(await fs.readFile(HEALTH_STATE_PATH, "utf8"));
+    if (!healthState.boxes) healthState = { boxes: {} };
+  } catch (err) {
+    console.warn("[health] could not load state:", err.message);
+    healthState = { boxes: {} };
+  }
+}
+
+async function saveHealthState() {
+  try {
+    await fs.writeFile(HEALTH_STATE_PATH, JSON.stringify(healthState, null, 2));
+  } catch (err) {
+    console.warn("[health] could not save state:", err.message);
+  }
+}
+
+function healthIssueKey(issue) {
+  // Stable key for transition detection. Falls back to plugin+severity when
+  // id is missing so we still dedup something instead of treating every
+  // poll as a new issue.
+  return `${issue.kind || "?"}:${issue.plugin || "?"}:${issue.id || issue.label || "?"}:${issue.reason || "?"}`;
+}
+
+function severityRank(s) {
+  return HEALTH_SEVERITY_RANK[String(s).toLowerCase()] ?? 0;
+}
+
+function meetsThreshold(severity, threshold) {
+  return severityRank(severity) >= severityRank(threshold || "warn");
+}
+
+async function fetchHealthDigest(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), HEALTH_FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function processBox(agentKey, agentConfig, box) {
+  if (!box.url) return { box: box.label, error: "no_url" };
+  let digest;
+  try {
+    digest = await fetchHealthDigest(box.url);
+  } catch (err) {
+    return { box: box.label, error: `fetch_failed: ${err.message}` };
+  }
+
+  const now = new Date().toISOString();
+  const tsNs = BigInt(Date.now()) * 1_000_000n;
+  const lastState = healthState.boxes[box.label] || { issues: {} };
+  const lastIssues = lastState.issues || {};
+  const issues = Array.isArray(digest.issues) ? digest.issues : [];
+  const currentKeys = new Set();
+  const lines = []; // InfluxDB line-protocol points for this box
+  const alerts = [];
+
+  // Per-issue point + transition detection.
+  let worst = 0;
+  for (const iss of issues) {
+    const key = healthIssueKey(iss);
+    currentKeys.add(key);
+    const sev = String(iss.severity || "info").toLowerCase();
+    worst = Math.max(worst, severityRank(sev));
+    const wasKnown = !!lastIssues[key];
+    const prev = lastIssues[key];
+
+    // Time-series per issue (granular).
+    lines.push(
+      `service_health_issues,agent=${escTagValue(agentKey)},box=${escTagValue(box.label)},plugin=${escTagValue(iss.plugin || "?")},kind=${escTagValue(iss.kind || "?")},reason=${escTagValue(iss.reason || "?")},severity=${escTagValue(sev)} severity_level=${severityRank(sev)}i ${tsNs}`
+    );
+
+    // Persist new "first_seen" / update "last_seen".
+    lastIssues[key] = {
+      severity: sev,
+      plugin: iss.plugin || "",
+      label: iss.label || "",
+      reason: iss.reason || "",
+      kind: iss.kind || "",
+      last_event: iss.last_event || null,
+      first_seen: prev?.first_seen || now,
+      last_seen: now,
+    };
+
+    // Alert conditions: new issue, OR escalation (warn→error).
+    const escalated = wasKnown && severityRank(sev) > severityRank(prev.severity);
+    const isNew = !wasKnown;
+    if ((isNew || escalated) && meetsThreshold(sev, agentConfig.alert_threshold)) {
+      alerts.push({
+        kind: escalated ? "escalation" : "new_issue",
+        text: `${box.label}/${iss.plugin || "?"}: ${iss.label || iss.id || "issue"} — ${iss.reason || sev}${iss.detail ? " (" + iss.detail + ")" : ""}`,
+        severity: sev === "error" ? "error" : "warn",
+        dedup_key: `${agentKey}:${box.label}:${key}`,
+        source: `${agentKey}:${box.label}`,
+      });
+    }
+  }
+
+  // Recovered: keys that were in lastIssues but are gone now.
+  for (const oldKey of Object.keys(lastIssues)) {
+    if (currentKeys.has(oldKey)) continue;
+    const prev = lastIssues[oldKey];
+    if (meetsThreshold(prev.severity, agentConfig.alert_threshold)) {
+      alerts.push({
+        kind: "recovered",
+        text: `${box.label}/${prev.plugin || "?"}: ${prev.label || oldKey} wieder OK`,
+        severity: "recovered",
+        dedup_key: `${agentKey}:${box.label}:${oldKey}`,
+        source: `${agentKey}:${box.label}`,
+      });
+    }
+    delete lastIssues[oldKey];
+  }
+
+  // Box-summary point.
+  const okCount = Number.isFinite(digest.ok_count) ? digest.ok_count : 0;
+  lines.push(
+    `service_health,agent=${escTagValue(agentKey)},box=${escTagValue(box.label)},host=${escTagValue(digest.host || "?")} ok_count=${okCount}i,issue_count=${issues.length}i,worst_severity=${worst}i ${tsNs}`
+  );
+
+  healthState.boxes[box.label] = {
+    last_polled_at: now,
+    last_ok_count: okCount,
+    issues: lastIssues,
+  };
+
+  // Ship the time-series points (best-effort; ignored if InfluxDB dormant).
+  await writeInfluxLines(lines);
+
+  // Fire alerts via WA-push gateway.
+  for (const a of alerts) {
+    try {
+      const result = await waPush({ text: a.text, severity: a.severity, source: a.source, dedup_key: a.dedup_key });
+      if (result.ok && result.dedup === "sent") healthMonitorState.alerts_sent++;
+      auditEvent("health.alert", { agent: agentKey, box: box.label, severity: a.severity, kind: a.kind }, a.text.slice(0, 100)).catch(() => {});
+    } catch (err) {
+      console.warn(`[health] alert push failed:`, err.message);
+    }
+  }
+
+  return { box: box.label, ok_count: okCount, issue_count: issues.length, alerts: alerts.length, lines: lines.length };
+}
+
+async function healthMonitorTick() {
+  let registry;
+  try {
+    registry = await readRegistry();
+  } catch (err) {
+    return;
+  }
+  const targets = [];
+  for (const [agentKey, agent] of Object.entries(registry.agents || {})) {
+    const cfg = agent.health_monitor;
+    if (!cfg || !cfg.enabled) continue;
+    for (const box of cfg.boxes || []) {
+      if (box.enabled === false) continue;
+      targets.push({ agentKey, agentConfig: cfg, box });
+    }
+  }
+  if (!targets.length) {
+    healthMonitorState.last_summary = "no boxes configured (dormant)";
+    healthMonitorState.last_run_at = new Date().toISOString();
+    return;
+  }
+  const allLines = [];
+  const results = [];
+  for (const t of targets) {
+    const r = await processBox(t.agentKey, t.agentConfig, t.box);
+    results.push(r);
+  }
+  await saveHealthState();
+  // Ship all measurement lines in one batched write.
+  const allLineStrings = [];
+  // (lines were not returned by processBox to keep that path simple; we
+  // rebuild a small batch from the persisted state for the summary points
+  // only — the per-issue points were already attempted via writeInfluxLines
+  // inside processBox? Actually no — let me re-architect: send lines from
+  // within processBox per-box. Keeps batching local.)
+  // For now: write per-box inside processBox via direct call.
+  healthMonitorState.last_run_at = new Date().toISOString();
+  healthMonitorState.polled = results.length;
+  healthMonitorState.last_summary = results
+    .map((r) => r.error ? `${r.box}:err` : `${r.box}:${r.ok_count}ok/${r.issue_count}iss${r.alerts ? "/" + r.alerts + "alert" : ""}`)
+    .join(" ");
+}
+
+let healthMonitorTimer = null;
+async function startHealthMonitorLoop() {
+  if (healthMonitorTimer) return;
+  await loadHealthState();
+  await healthMonitorTick();
+  healthMonitorTimer = setInterval(healthMonitorTick, HEALTH_POLL_MS);
 }
 
 async function queryFlux(flux) {
@@ -1518,6 +1750,8 @@ async function handleApi(req, res, url) {
         { method: "POST",   path: "/api/sources/:id/test",  purpose: "ping the source's /health endpoint. Returns {ok, status, message}" },
         { method: "GET",    path: "/api/wa-push",           purpose: "WA-push gateway status: outbox path, dedup cache, rate-limit window" },
         { method: "POST",   path: "/api/wa-push",           purpose: "push a WhatsApp message to Jörg via wa-bridge. body: { text, severity:info|warn|error|recovered, source, dedup_key?, to_phone? }. Dedup 10min, rate-limit 30/5min." },
+        { method: "GET",    path: "/api/health-monitor",    purpose: "health-monitor loop status + per-box current issues. Dormant until an agent has health_monitor.enabled=true with boxes in the registry." },
+        { method: "POST",   path: "/api/health-monitor/poll", purpose: "force an immediate poll cycle (returns after completion)." },
       ],
       notes: "All responses are JSON. No auth — LAN only. Spawn/stop drives Terminal.app via AppleScript on macOS.",
     });
@@ -1567,6 +1801,20 @@ async function handleApi(req, res, url) {
       return send(400, result);
     }
     return send(200, result);
+  }
+
+  // Health-monitor: status reader + manual trigger.
+  if (req.method === "GET" && url.pathname === "/api/health-monitor") {
+    return send(200, {
+      poll_interval_ms: HEALTH_POLL_MS,
+      fetch_timeout_ms: HEALTH_FETCH_TIMEOUT_MS,
+      state: healthMonitorState,
+      boxes: healthState.boxes || {},
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/health-monitor/poll") {
+    await healthMonitorTick();
+    return send(200, { ok: true, state: healthMonitorState });
   }
 
   // Recent-activity feed: last skill calls + hub audit events merged.
@@ -1989,4 +2237,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[agent-master] registry: ${REGISTRY_PATH}`);
   startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
   startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
+  startHealthMonitorLoop().catch((e) => console.warn("[health] start failed:", e.message));
 });
