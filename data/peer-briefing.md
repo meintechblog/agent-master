@@ -29,6 +29,8 @@ Faustregel: „Schick Jörg ne Mail" = REDACTED-DOMAIN. „Git commit author" = 
 
 **Hub-UI:** http://192.168.3.127:7890 — Tab pro Peer, Live-SSE, Skills/Health/Deploy-Status, Spawn/Stop. Bei Fragen zur Hub-Architektur: lies das README von agent-master.
 
+**📵 WA-Pushes sind OPT-IN, nie default.** Wenn du `/api/wa-push` callst, gehst du davon aus, dass der User dich explizit darum gebeten hat ("ping mich wenn X"). Automatisches Pushen "weil's eine Statusänderung gab" → NEIN. Logging in InfluxDB + Activity-Feed reicht, der User schaut dort proaktiv rein. Nur wenn Jörg ausdrücklich gesagt hat "alerts mich bei Y" → opt-in pro Quelle aktivieren, dann pushen.
+
 **Wenn du das gelesen hast:** nichts antworten — das ist Push-Briefing, kein Dialog. Wenn was unklar ist, ping Hulki via `send_message agent-master-hub "<frage>"`.
 
 — Hulki 🤖

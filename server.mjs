@@ -905,11 +905,14 @@ async function processBox(agentKey, agentConfig, box) {
     };
 
     // Alert conditions: new issue, OR escalation (warn→error). Skipped on
-    // the very first poll of a box — that one only bootstraps state so we
-    // don't dump every pre-existing issue as a fresh alert.
+    // the very first poll of a box (silent bootstrap) AND when wa_alerts
+    // isn't explicitly enabled for this box — WA-pushes are opt-in to
+    // avoid unsolicited noise on Jörg's phone. State + InfluxDB logging
+    // happen regardless; only the WA-push decision is gated.
+    const waAlertsEnabled = box.wa_alerts === true;
     const escalated = wasKnown && severityRank(sev) > severityRank(prev.severity);
     const isNew = !wasKnown;
-    if (!isFirstPoll && (isNew || escalated) && meetsThreshold(sev, agentConfig.alert_threshold)) {
+    if (!isFirstPoll && waAlertsEnabled && (isNew || escalated) && meetsThreshold(sev, agentConfig.alert_threshold)) {
       alerts.push({
         kind: escalated ? "escalation" : "new_issue",
         text: `${box.label}/${iss.plugin || "?"}: ${iss.label || iss.id || "issue"} — ${iss.reason || sev}${iss.detail ? " (" + iss.detail + ")" : ""}`,
@@ -924,9 +927,10 @@ async function processBox(agentKey, agentConfig, box) {
   for (const oldKey of Object.keys(lastIssues)) {
     if (currentKeys.has(oldKey)) continue;
     const prev = lastIssues[oldKey];
-    // Recovered alerts also skipped on first poll (lastIssues was empty
-    // anyway so this branch wouldn't normally run, but be explicit).
-    if (!isFirstPoll && meetsThreshold(prev.severity, agentConfig.alert_threshold)) {
+    // Recovered alerts: same opt-in gate as new-issue alerts. Skipped on
+    // first poll (lastIssues was empty anyway) AND when wa_alerts is off.
+    const waAlertsEnabledRec = box.wa_alerts === true;
+    if (!isFirstPoll && waAlertsEnabledRec && meetsThreshold(prev.severity, agentConfig.alert_threshold)) {
       alerts.push({
         kind: "recovered",
         text: `${box.label}/${prev.plugin || "?"}: ${prev.label || oldKey} wieder OK`,
