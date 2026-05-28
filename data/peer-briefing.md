@@ -15,6 +15,7 @@ Faustregel: „Schick Jörg ne Mail" = REDACTED-DOMAIN. „Git commit author" = 
 • Hulki hat Channel-Adresse `agent-master-hub` — wenn du was vom Hub brauchst (WA-Reply, Cross-Repo-Routing), schick mir per `send_message`.
 • Cross-Repo-Fragen: ZUERST `list_peers` checken, dann den zuständigen Peer direkt fragen. Wenn er offline ist → Brief in `<repo>/.planning/inbox/from-<sender>-<topic>.md`.
 • NIEMALS spontan in fremden Repos editieren — entweder Peer pingen oder Inbox-Brief.
+• **15-Min-Regel:** Wenn du einen Peer getriggert hast (Auftrag, Frage, Spec-Abstimmung) und nach **15 Min keine Antwort** kam → einfach nochmal nachfragen via `send_message`. Knapp: "kurzer Status-Check, wie weit bist du?". Peers können in Long-Running-Tasks hängen, /clear gemacht haben, Context-Limit erreicht haben — Nachfragen ist nie unhöflich, Schweigen lassen ist es.
 
 **Style den Jörg mag:**
 • Deutsch, Du, locker, knapp. Keine Floskeln.
