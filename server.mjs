@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
+import { complete as llmComplete, listModels as llmListModels } from "./lib/llm-gateway.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AGENT_HUB_PORT || "7890", 10);
@@ -1888,6 +1889,9 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
         { method: "POST", path: "/api/agents/create",    purpose: "scaffold + auto-spawn a brand-new agent workspace (~/codex/<name>/ + git init + registry append)", body: { name: "<kebab-case>", mission: "<10-500 chars>" } },
+        { method: "GET",  path: "/api/llm/models",       purpose: "list available logical models (sonnet/haiku/opus) + their providers" },
+        { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>" } },
+        { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
@@ -2285,6 +2289,68 @@ async function handleApi(req, res, url) {
       return null;
     }
   };
+
+  if (req.method === "GET" && url.pathname === "/api/llm/models") {
+    return send(200, llmListModels());
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/llm/complete") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    const caller = String(parsed.caller || "unknown").slice(0, 60);
+    try {
+      const result = await llmComplete(parsed);
+      // Track: audit_event (for the activity feed) + dedicated influx measurement
+      // for the LLM stats endpoint to query.
+      auditEvent("llm.call", {
+        target: caller,
+        model: result.logical_model || parsed.model || "?",
+        provider: result.provider,
+      }, `LLM ${result.logical_model} ← ${caller} (${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
+      writeInfluxLines([
+        `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
+        + `input_tokens=${result.usage.input_tokens}i,`
+        + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
+        + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
+        + `output_tokens=${result.usage.output_tokens}i,`
+        + `total_tokens=${result.usage.total_tokens}i,`
+        + `latency_ms=${result.latency_ms}i,`
+        + `raw_cost_usd=${result.raw_cost_usd || 0} `
+        + `${BigInt(Date.now()) * 1_000_000n}`
+      ]).catch(() => {});
+      return send(200, result);
+    } catch (e) {
+      auditEvent("llm.call.fail", { target: caller, model: parsed.model || "?" }, `LLM FAIL ${caller}: ${e.message.slice(0, 80)}`).catch(() => {});
+      return send(500, { error: "llm_failed", reason: String(e.message) });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/llm/stats") {
+    // Aggregate today + 7d from InfluxDB llm_call measurement.
+    try {
+      const target = await resolveInfluxTarget();
+      const bucket = target.bucket;
+      const buildQ = (range) =>
+        `from(bucket:"${bucket}")
+          |> range(start:${range})
+          |> filter(fn:(r)=>r._measurement=="llm_call")
+          |> filter(fn:(r)=>r._field=="total_tokens" or r._field=="output_tokens" or r._field=="raw_cost_usd" or r._field=="latency_ms")
+          |> group(columns:["model","caller","_field"])
+          |> sum()`;
+      const [r24, r7d] = await Promise.all([
+        queryFlux(buildQ("-24h")).catch((e) => ({ error: String(e.message) })),
+        queryFlux(buildQ("-7d")).catch((e) => ({ error: String(e.message) })),
+      ]);
+      return send(200, {
+        last_24h: r24,
+        last_7d: r7d,
+        bucket,
+        note: "raw_cost_usd is the API-equivalent price the Claude CLI reports; actual billing is against your Pro/Max plan token bucket — Sonnet+Opus have separate pools.",
+      });
+    } catch (e) {
+      return send(500, { error: "stats_failed", reason: String(e.message) });
+    }
+  }
 
   if (req.method === "POST" && url.pathname === "/api/agents/create") {
     const parsed = await readJson();
