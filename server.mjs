@@ -1183,6 +1183,149 @@ function runOsa(script) {
   });
 }
 
+// === Agent scaffolding ===
+//
+// `POST /api/agents/create` bootstraps a new agent workspace from scratch:
+//   1. `~/codex/<name>/` dir with CLAUDE.md (mission) + .gitignore
+//   2. `git init` + initial commit (uses global git identity = Jörg)
+//   3. registry.json append with sensible defaults (Domain role, local-only deployment)
+//   4. immediate spawnAgent() so the user lands in the new tab
+//
+// GitHub repo creation is intentionally out of scope — the agent itself does that
+// on demand once it has something worth publishing.
+
+const CODEX_ROOT = path.join(process.env.HOME, "codex");
+const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]*[a-z0-9]$/;
+const AGENT_COLOR_PALETTE = [
+  "#ff6b6b", "#4ecdc4", "#a29bfe", "#fdcb6e", "#6c5ce7",
+  "#00b894", "#fd79a8", "#74b9ff", "#e17055", "#55efc4",
+  "#ffeaa7", "#81ecec", "#fab1a0", "#b2bec3", "#dfe6e9",
+];
+
+function validateAgentName(raw) {
+  if (typeof raw !== "string") throw new Error("name must be a string");
+  const name = raw.trim().toLowerCase();
+  if (name.length < 3 || name.length > 40) throw new Error("name length must be 3-40 chars");
+  if (!AGENT_NAME_PATTERN.test(name)) throw new Error("name must be kebab-case (a-z, 0-9, -)");
+  return name;
+}
+
+function defaultRegistryEntry(name, mission) {
+  const colorIdx = [...name].reduce((s, c) => s + c.charCodeAt(0), 0) % AGENT_COLOR_PALETTE.length;
+  return {
+    repo: path.join(CODEX_ROOT, name),
+    role: "Domain",
+    display_name: name,
+    description: mission,
+    capabilities: [],
+    when_to_use: [],
+    deployment: { type: "local-only", host: "Mac" },
+    owned_endpoints: [],
+    mqtt_topics: { publishes: [], subscribes: [] },
+    depends_on: [],
+    secrets_at: null,
+    repo_url: null,
+    health_check: null,
+    memory_refs: [],
+    live_dashboards: [],
+    tags: ["new"],
+    color: AGENT_COLOR_PALETTE[colorIdx],
+    created_at: new Date().toISOString(),
+    created_via: "agent-master/api/agents/create",
+  };
+}
+
+function runQuiet(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, opts);
+    let stderr = "";
+    child.stderr?.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`${cmd} exit ${code}: ${stderr.slice(0, 200)}`))
+    );
+  });
+}
+
+async function scaffoldAgentRepo(cwd, name, mission) {
+  await fs.mkdir(cwd, { recursive: true });
+  const claudeMd =
+`# ${name}
+
+## Mission
+
+${mission}
+
+## Status
+
+Frisch angelegt via agent-master Hub. Noch keine Implementierung — der erste Job vom Operator definiert die Richtung.
+
+## Operator
+
+Jörg. Identität, Email-Tabelle, WA-Kontakt: siehe globales \`~/.claude/CLAUDE.md\`.
+
+## Hub-Anbindung
+
+Diese Session ist Teil des claude-peers-Netzwerks (Hub = agent-master / "Hulki" auf \`localhost:7890\`). Cross-Repo-Fragen gehen via \`mcp__claude-peers__send_message\`, nicht via Repo-Wechsel.
+`;
+  const gitignore =
+`# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Node (falls später relevant)
+node_modules/
+npm-debug.log*
+.env
+.env.local
+
+# Secrets
+secrets/
+`;
+  await fs.writeFile(path.join(cwd, "CLAUDE.md"), claudeMd);
+  await fs.writeFile(path.join(cwd, ".gitignore"), gitignore);
+  await runQuiet("git", ["init", "-b", "main"], { cwd });
+  await runQuiet("git", ["add", "."], { cwd });
+  await runQuiet("git", ["commit", "-m", "chore: initial scaffold via agent-master"], { cwd });
+}
+
+async function writeRegistryAtomic(registry) {
+  const tmp = REGISTRY_PATH + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(registry, null, 2));
+  await fs.rename(tmp, REGISTRY_PATH);
+}
+
+async function createAgent({ name: rawName, mission: rawMission }) {
+  const name = validateAgentName(rawName);
+  const mission = String(rawMission || "").trim();
+  if (mission.length < 10) throw new Error("mission must be at least 10 chars");
+  if (mission.length > 500) throw new Error("mission must be at most 500 chars");
+
+  const registry = await readRegistry();
+  if (registry.agents[name]) {
+    const err = new Error(`agent '${name}' already exists in registry`);
+    err.code = "name_taken";
+    throw err;
+  }
+  const cwd = path.join(CODEX_ROOT, name);
+  if (existsSync(cwd)) {
+    const err = new Error(`directory already exists: ${cwd}`);
+    err.code = "dir_exists";
+    throw err;
+  }
+
+  await scaffoldAgentRepo(cwd, name, mission);
+  registry.agents[name] = defaultRegistryEntry(name, mission);
+  registry._meta = registry._meta || {};
+  registry._meta.updated_at = new Date().toISOString();
+  await writeRegistryAtomic(registry);
+
+  return { name, cwd, registry };
+}
+
 async function waitForPeerRegistration(cwd, { timeoutMs = 20000, pollMs = 500 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1235,8 +1378,16 @@ async function spawnAgent(repoKey, registry) {
   // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. No sleep + no
   // AppleScript keystroke needed here — we just open a tab, run claudepeers, and
   // poll the broker until the peer registers (or timeout).
+  // Race-condition fix (2026-05-28): the `keystroke "t" using command down`
+  // used to fire before Terminal was actually frontmost when another app
+  // (browser, editor) was in focus. The `t` then landed as a literal in the
+  // foreground app's input — observed in the wild as `tcd /path && claudepeers`
+  // appearing in the *previous* shell, with no new tab opening. The 300 ms
+  // delay after `activate` gives the WindowServer time to bring Terminal
+  // forward before System Events targets it.
   const script = `
     tell application "Terminal" to activate
+    delay 0.3
     tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
     delay 1
     tell application "Terminal"
@@ -1736,6 +1887,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/usage",            purpose: "ccusage cost overlay (5 min cached)" },
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
+        { method: "POST", path: "/api/agents/create",    purpose: "scaffold + auto-spawn a brand-new agent workspace (~/codex/<name>/ + git init + registry append)", body: { name: "<kebab-case>", mission: "<10-500 chars>" } },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
@@ -2133,6 +2285,38 @@ async function handleApi(req, res, url) {
       return null;
     }
   };
+
+  if (req.method === "POST" && url.pathname === "/api/agents/create") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    let created;
+    try {
+      created = await createAgent({ name: parsed.name, mission: parsed.mission });
+    } catch (e) {
+      const status = e.code === "name_taken" || e.code === "dir_exists" ? 409 : 400;
+      auditEvent("agent.create.fail", { target: parsed.name || "?" }, `Create FAIL: ${e.message.slice(0, 80)}`).catch(() => {});
+      return send(status, { error: e.code || "create_failed", reason: String(e.message) });
+    }
+    auditEvent("agent.create", { target: created.name }, `Neuer Agent angelegt: ${created.name}`).catch(() => {});
+    // Auto-spawn — failure here is non-fatal; agent is still created and can be spawned manually.
+    let spawnResult = null;
+    let spawnError = null;
+    try {
+      spawnResult = await spawnAgent(created.name, created.registry);
+      auditEvent("spawn.success", { target: created.name }, `Spawn: ${created.name}`).catch(() => {});
+    } catch (e) {
+      spawnError = String(e.message);
+      auditEvent("spawn.fail", { target: created.name }, `Spawn FAIL ${created.name}: ${e.message.slice(0, 80)}`).catch(() => {});
+    }
+    broadcastStatus();
+    return send(200, {
+      ok: true,
+      created: created.name,
+      cwd: created.cwd,
+      spawn: spawnResult,
+      spawn_error: spawnError,
+    });
+  }
 
   if (req.method === "POST" && url.pathname === "/api/spawn") {
     const parsed = await readJson();

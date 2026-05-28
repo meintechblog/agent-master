@@ -189,6 +189,41 @@
     border-left-color: var(--accent);
     font-weight: 600;
   }
+  nav.tabs button.tab-new {
+    margin-top: 10px;
+    border-top: 1px dashed var(--border);
+    padding-top: 14px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  nav.tabs button.tab-new:hover { color: var(--text); }
+  nav.tabs button.tab-new .plus {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--panel-2); color: var(--text);
+    font-size: 14px; font-weight: 700; line-height: 1;
+  }
+  /* Create-agent modal form */
+  .create-form { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
+  .create-form label {
+    display: flex; flex-direction: column; gap: 6px;
+    font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .create-form input[type="text"], .create-form textarea {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    text-transform: none; letter-spacing: 0;
+  }
+  .create-form textarea { min-height: 110px; resize: vertical; font-family: inherit; line-height: 1.5; }
+  .create-form input:focus, .create-form textarea:focus { outline: none; border-color: var(--accent); }
+  .create-form .hint { font-size: 11px; color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+  .create-form .error { color: var(--red); font-size: 12px; padding: 4px 0; }
   .dot {
     width: 8px;
     height: 8px;
@@ -1271,6 +1306,35 @@
   </div>
 </div>
 
+<!-- Create-agent modal -->
+<div class="modal-overlay" id="create-agent-modal" onclick="if(event.target===this)closeCreateAgentModal()">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-head">
+      <span class="modal-title">➕ Neuen Agent anlegen</span>
+      <button class="modal-close" onclick="closeCreateAgentModal()" title="Schließen (Esc)">×</button>
+    </div>
+    <div class="modal-body" style="white-space:normal;font-family:inherit;font-size:13px">
+      <form class="create-form" id="create-agent-form" onsubmit="event.preventDefault(); submitCreateAgent()">
+        <label>
+          Name
+          <input type="text" id="create-agent-name" required placeholder="camping-master" autocomplete="off" spellcheck="false" pattern="^[a-z][a-z0-9-]*[a-z0-9]$">
+          <span class="hint">kebab-case (a–z, 0–9, -). Wird Verzeichnisname unter <code>~/codex/</code> und Registry-Key.</span>
+        </label>
+        <label>
+          Mission
+          <textarea id="create-agent-mission" required placeholder="Was soll dieser Agent für mich tun?" minlength="10" maxlength="500"></textarea>
+          <span class="hint">10–500 Zeichen. Landet als „Mission" in <code>CLAUDE.md</code> und als <code>description</code> in der Registry.</span>
+        </label>
+        <div id="create-agent-error" class="error" style="display:none"></div>
+        <div class="modal-foot" style="margin:0;padding:8px 0 0;border-top:0">
+          <button type="button" class="btn btn-secondary" onclick="closeCreateAgentModal()">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" id="create-agent-submit">Anlegen + Spawnen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <!-- Toast for clipboard / favorite feedback -->
 <div class="toast" id="toast"></div>
 
@@ -1367,9 +1431,9 @@ function closeSkillModal() {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.getElementById("skill-modal")?.classList.contains("open")) {
-    closeSkillModal();
-  }
+  if (e.key !== "Escape") return;
+  if (document.getElementById("skill-modal")?.classList.contains("open")) closeSkillModal();
+  else if (document.getElementById("create-agent-modal")?.classList.contains("open")) closeCreateAgentModal();
 });
 
 function fmtCost(n) { return "$" + (n || 0).toFixed(2); }
@@ -1521,6 +1585,59 @@ function renderTabs() {
     `;
     btn.onclick = () => { active = key; render(); };
     tabs.appendChild(btn);
+  }
+  const addBtn = document.createElement("button");
+  addBtn.className = "tab-new";
+  addBtn.title = "Neuen Agent anlegen — scaffold + spawn";
+  addBtn.innerHTML = `<span class="plus">+</span><span>Neuer Agent…</span>`;
+  addBtn.onclick = openCreateAgentModal;
+  tabs.appendChild(addBtn);
+}
+
+function openCreateAgentModal() {
+  document.getElementById("create-agent-name").value = "";
+  document.getElementById("create-agent-mission").value = "";
+  document.getElementById("create-agent-error").style.display = "none";
+  document.getElementById("create-agent-submit").disabled = false;
+  document.getElementById("create-agent-submit").textContent = "Anlegen + Spawnen";
+  document.getElementById("create-agent-modal").classList.add("open");
+  setTimeout(() => document.getElementById("create-agent-name").focus(), 30);
+}
+function closeCreateAgentModal() {
+  document.getElementById("create-agent-modal").classList.remove("open");
+}
+async function submitCreateAgent() {
+  const name = document.getElementById("create-agent-name").value.trim();
+  const mission = document.getElementById("create-agent-mission").value.trim();
+  const errEl = document.getElementById("create-agent-error");
+  const submitBtn = document.getElementById("create-agent-submit");
+  errEl.style.display = "none";
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Scaffolde + spawne… (~15 s)";
+  try {
+    const r = await fetch("/api/agents/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, mission }),
+    });
+    const result = await r.json();
+    if (!r.ok || result.error) {
+      errEl.textContent = `${result.error || "create_failed"}: ${result.reason || ""}`;
+      errEl.style.display = "block";
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Anlegen + Spawnen";
+      return;
+    }
+    closeCreateAgentModal();
+    // SSE updates the agents list. Switch to the new tab once it appears.
+    active = result.created;
+    if (state.agents[result.created]) render();
+    showToast(result.spawn_error ? `⚠️ ${result.created} angelegt, Spawn fehlgeschlagen: ${result.spawn_error.slice(0,60)}` : `✅ ${result.created} angelegt + gespawnt`);
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Anlegen + Spawnen";
   }
 }
 
@@ -1872,6 +1989,8 @@ const ACTIVITY_KIND_META = {
   "briefing.sent":     { icon: "👋", group: "briefing", label: "Briefing" },
   "spawn.success":     { icon: "🚀", group: "spawn",    label: "Spawn" },
   "spawn.fail":        { icon: "💥", group: "spawn",    label: "Spawn FAIL" },
+  "agent.create":      { icon: "➕", group: "spawn",    label: "Neuer Agent" },
+  "agent.create.fail": { icon: "🚫", group: "spawn",    label: "Create FAIL" },
   "stop.success":      { icon: "⏹",  group: "stop",     label: "Stop" },
   "stop.fail":         { icon: "💥", group: "stop",     label: "Stop FAIL" },
   "soft_stop.start":   { icon: "🛑", group: "stop",     label: "Soft-Stop" },
