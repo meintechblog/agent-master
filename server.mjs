@@ -5,7 +5,7 @@
 
 import http from "node:http";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
@@ -88,7 +88,12 @@ const HEALTH_SEVERITY_RANK = { ok: 0, info: 0, warn: 1, error: 2 };
 // future energy/venusos alarms) call instead of writing wa-bridge outbox
 // files themselves. Keeps dedup, rate-limit, and rendering in one place.
 const WA_OUTBOX_DIR = path.join(process.env.HOME, "codex", "wa-bridge", "data", "outbox");
-const WA_DEFAULT_PHONE = "+PHONE-REDACTED";
+// Operator's default WA target — never commit a real number. Read from env,
+// else from gitignored data/.wa-phone, else empty (wa-push then requires an
+// explicit to_e164 per call).
+const WA_PHONE_FILE = path.join(__dirname, "data", ".wa-phone");
+const WA_DEFAULT_PHONE = process.env.WA_DEFAULT_PHONE
+  || (existsSync(WA_PHONE_FILE) ? readFileSync(WA_PHONE_FILE, "utf8").trim() : "");
 const WA_DEDUP_TTL_MS = 10 * 60 * 1000;
 const WA_RATE_LIMIT_COUNT = 30;
 const WA_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
@@ -928,7 +933,7 @@ async function waPush(body) {
 //     "enabled": true,
 //     "alert_threshold": "warn",     // alert on this severity or worse
 //     "boxes": [
-//       { "label": "hallbude", "url": "http://192.168.3.213/api/health/digest",
+//       { "label": "example", "url": "http://<lan-host>/api/health/digest",
 //         "enabled": true },
 //       { "label": "lulubude", "url": "http://172.25.0.85/api/health/digest",
 //         "enabled": false }

@@ -30,3 +30,4 @@ launchd/*.local.plist
 *.png
 .backups/
 *.jpeg
+data/.wa-phone
