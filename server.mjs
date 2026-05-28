@@ -1972,7 +1972,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
         { method: "POST", path: "/api/agents/create",    purpose: "scaffold + auto-spawn a brand-new agent workspace (~/codex/<name>/ + git init + registry append)", body: { name: "<kebab-case>", mission: "<10-500 chars>" } },
-        { method: "GET",  path: "/api/llm/models",       purpose: "list available logical models (sonnet/haiku/opus) + their providers" },
+        { method: "GET",  path: "/api/llm/models",       purpose: "list available logical models (sonnet/haiku/opus) + their providers. Pass ?probe_ollama=1 to also enumerate Ollama-installed local models" },
         { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>", template: "<optional template name, see /api/llm/templates>" } },
         { method: "POST", path: "/api/llm/complete/stream", purpose: "same as /api/llm/complete but streams tokens as SSE — events: text, thinking (if include_thinking:true), rate_limit, done, error", body: { model: "sonnet|haiku|opus", prompt: "<str>", caller: "<your-repo>", template: "<optional>", include_thinking: "false" } },
         { method: "GET",  path: "/api/llm/templates",    purpose: "list available prompt-templates (commit-msg, log-summary, german-ui, …) — pass ?include_system=1 to see full system prompts" },
@@ -2386,7 +2386,8 @@ async function handleApi(req, res, url) {
   };
 
   if (req.method === "GET" && url.pathname === "/api/llm/models") {
-    return send(200, llmListModels());
+    const probeOllama = url.searchParams.get("probe_ollama") === "1";
+    return send(200, await llmListModels(probeOllama));
   }
 
   if (req.method === "GET" && url.pathname === "/api/llm/cache") {
