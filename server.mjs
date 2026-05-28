@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
-import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels } from "./lib/llm-gateway.mjs";
+import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels, getCacheStats as llmGetCacheStats, clearCache as llmClearCache } from "./lib/llm-gateway.mjs";
 import { listTemplates as llmListTemplates } from "./lib/llm-templates.mjs";
 
 // === LLM live-usage tracking (in-memory, for sidebar dots) ===
@@ -1947,6 +1947,7 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>", template: "<optional template name, see /api/llm/templates>" } },
         { method: "POST", path: "/api/llm/complete/stream", purpose: "same as /api/llm/complete but streams tokens as SSE — events: text, thinking (if include_thinking:true), rate_limit, done, error", body: { model: "sonnet|haiku|opus", prompt: "<str>", caller: "<your-repo>", template: "<optional>", include_thinking: "false" } },
         { method: "GET",  path: "/api/llm/templates",    purpose: "list available prompt-templates (commit-msg, log-summary, german-ui, …) — pass ?include_system=1 to see full system prompts" },
+        { method: "GET",  path: "/api/llm/cache",        purpose: "in-memory response-cache stats (hits/misses/size). ?clear=1 wipes the cache. Cache is keyed on SHA256(model+system+prompt+json_schema+max_tokens), default TTL 5min, override per-call via cache_ttl_ms or disable via cache:false" },
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
@@ -2359,6 +2360,14 @@ async function handleApi(req, res, url) {
     return send(200, llmListModels());
   }
 
+  if (req.method === "GET" && url.pathname === "/api/llm/cache") {
+    // Cache status: size, hits, misses, evictions. ?clear=1 wipes it.
+    if (url.searchParams.get("clear") === "1") {
+      return send(200, { cleared: true, ...llmClearCache() });
+    }
+    return send(200, llmGetCacheStats());
+  }
+
   if (req.method === "GET" && url.pathname === "/api/llm/templates") {
     // Discovery for peers: which prompt-templates exist + their defaults.
     // ?include_system=1 returns the full system prompt (larger payload).
@@ -2388,25 +2397,29 @@ async function handleApi(req, res, url) {
     try {
       const result = await llmComplete(parsed);
       // In-memory tracking for the sidebar live-dots (cheap, no influx roundtrip).
-      bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
-      // Track: audit_event (for the activity feed) + dedicated influx measurement
-      // for the LLM stats endpoint to query.
+      // Cache hits don't count as plan-burn — log them but don't bump live-dots.
+      const isCacheHit = result.cache_status === "hit";
+      if (!isCacheHit) {
+        bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
+        // InfluxDB row only on actual call (miss/skip). Otherwise stats would double-count cached calls.
+        writeInfluxLines([
+          `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
+          + `input_tokens=${result.usage.input_tokens}i,`
+          + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
+          + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
+          + `output_tokens=${result.usage.output_tokens}i,`
+          + `total_tokens=${result.usage.total_tokens}i,`
+          + `latency_ms=${result.latency_ms}i,`
+          + `raw_cost_usd=${result.raw_cost_usd || 0} `
+          + `${BigInt(Date.now()) * 1_000_000n}`
+        ]).catch(() => {});
+      }
       auditEvent("llm.call", {
         target: caller,
         model: result.logical_model || parsed.model || "?",
         provider: result.provider,
-      }, `LLM ${result.logical_model} ← ${caller} (${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
-      writeInfluxLines([
-        `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
-        + `input_tokens=${result.usage.input_tokens}i,`
-        + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
-        + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
-        + `output_tokens=${result.usage.output_tokens}i,`
-        + `total_tokens=${result.usage.total_tokens}i,`
-        + `latency_ms=${result.latency_ms}i,`
-        + `raw_cost_usd=${result.raw_cost_usd || 0} `
-        + `${BigInt(Date.now()) * 1_000_000n}`
-      ]).catch(() => {});
+      }, `LLM ${result.logical_model} ← ${caller} (${isCacheHit ? "cache" : result.usage.total_tokens + "t"}, ${result.latency_ms}ms)`).catch(() => {});
+      res.setHeader("X-Cache", result.cache_status || "skip");
       return send(200, result);
     } catch (e) {
       auditEvent("llm.call.fail", { target: caller, model: parsed.model || "?" }, `LLM FAIL ${caller}: ${e.message.slice(0, 80)}`).catch(() => {});
@@ -2442,23 +2455,26 @@ async function handleApi(req, res, url) {
         else if (ev.type === "done") writeEvent("done", ev.result);
         else if (ev.type === "error") writeEvent("error", { error: ev.error });
       });
-      bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
+      const isCacheHit = result.cache_status === "hit";
+      if (!isCacheHit) {
+        bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
+        writeInfluxLines([
+          `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
+          + `input_tokens=${result.usage.input_tokens}i,`
+          + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
+          + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
+          + `output_tokens=${result.usage.output_tokens}i,`
+          + `total_tokens=${result.usage.total_tokens}i,`
+          + `latency_ms=${result.latency_ms}i,`
+          + `raw_cost_usd=${result.raw_cost_usd || 0} `
+          + `${BigInt(Date.now()) * 1_000_000n}`
+        ]).catch(() => {});
+      }
       auditEvent("llm.call", {
         target: caller,
         model: result.logical_model || parsed.model || "?",
         provider: result.provider,
-      }, `LLM ${result.logical_model} ← ${caller} (stream, ${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
-      writeInfluxLines([
-        `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
-        + `input_tokens=${result.usage.input_tokens}i,`
-        + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
-        + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
-        + `output_tokens=${result.usage.output_tokens}i,`
-        + `total_tokens=${result.usage.total_tokens}i,`
-        + `latency_ms=${result.latency_ms}i,`
-        + `raw_cost_usd=${result.raw_cost_usd || 0} `
-        + `${BigInt(Date.now()) * 1_000_000n}`
-      ]).catch(() => {});
+      }, `LLM ${result.logical_model} ← ${caller} (stream${isCacheHit ? "/cache" : ""}, ${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
       if (!closed) res.end();
     } catch (e) {
       writeEvent("error", { error: String(e.message) });
