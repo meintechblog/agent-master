@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
 import { complete as llmComplete, listModels as llmListModels } from "./lib/llm-gateway.mjs";
+import { listTemplates as llmListTemplates } from "./lib/llm-templates.mjs";
 
 // === LLM live-usage tracking (in-memory, for sidebar dots) ===
 // Rolling 24h window. Updated on every /api/llm/complete call. Pruned on read.
@@ -1943,7 +1944,8 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
         { method: "POST", path: "/api/agents/create",    purpose: "scaffold + auto-spawn a brand-new agent workspace (~/codex/<name>/ + git init + registry append)", body: { name: "<kebab-case>", mission: "<10-500 chars>" } },
         { method: "GET",  path: "/api/llm/models",       purpose: "list available logical models (sonnet/haiku/opus) + their providers" },
-        { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>" } },
+        { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>", template: "<optional template name, see /api/llm/templates>" } },
+        { method: "GET",  path: "/api/llm/templates",    purpose: "list available prompt-templates (commit-msg, log-summary, german-ui, …) — pass ?include_system=1 to see full system prompts" },
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
@@ -2354,6 +2356,16 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/llm/models") {
     return send(200, llmListModels());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/llm/templates") {
+    // Discovery for peers: which prompt-templates exist + their defaults.
+    // ?include_system=1 returns the full system prompt (larger payload).
+    const includeSystem = url.searchParams.get("include_system") === "1";
+    return send(200, {
+      templates: llmListTemplates(includeSystem),
+      usage_hint: "POST /api/llm/complete with { template: \"<name>\", input: \"<text>\", caller: \"<your-repo>\" }",
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/llm/live") {
