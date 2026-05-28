@@ -32,6 +32,10 @@ function bumpLlmUsage(caller, model, totalTokens, latencyMs) {
   entry.latencies.push(latencyMs || 0);
   if (entry.latencies.length > 20) entry.latencies = entry.latencies.slice(-20);  // rolling avg
   llmUsageMap.set(caller, entry);
+  // Push instantly to all SSE clients so the sidebar dot lights up on the same
+  // tick the call completes — defined later in the file so wrap in try/catch
+  // for module-init ordering safety.
+  try { broadcastLlmLive(); } catch {}
 }
 
 function pruneLlmUsage() {
@@ -1884,6 +1888,26 @@ async function broadcastUsage() {
   }
 }
 
+// Fire-and-forget broadcast triggered from bumpLlmUsage (synchronous on every
+// /api/llm/complete success). No timer — purely event-driven, so the sidebar
+// dots flip on the same tick a peer's call completes.
+function broadcastLlmLive() {
+  if (sseClients.size === 0) return;
+  pruneLlmUsage();
+  const payload = {
+    now: Date.now(),
+    live_window_ms: LLM_LIVE_PULSE_MS,
+    recent_window_ms: LLM_RECENT_WINDOW_MS,
+    by_caller: Object.fromEntries(llmUsageMap),
+  };
+  for (const res of sseClients) sseSend(res, "llm_live", payload);
+}
+
+// Also tick once per LLM_LIVE_PULSE_MS so the "live" → "recent" transition
+// happens on its own when no new call comes in (otherwise the pulsing dot
+// would never settle to the static state on the client until the next call).
+setInterval(() => { if (sseClients.size) broadcastLlmLive(); }, LLM_LIVE_PULSE_MS);
+
 setInterval(broadcastStatus, BROADCAST_MS);
 setInterval(broadcastUsage, USAGE_CACHE_MS);
 
@@ -2303,6 +2327,15 @@ async function handleApi(req, res, url) {
     res.write(`: connected\n\n`);
     sseClients.add(res);
     broadcastStatus().catch(() => {});
+    // Push an immediate llm_live snapshot so the new client doesn't have to
+    // wait for the first call or the heartbeat interval.
+    pruneLlmUsage();
+    sseSend(res, "llm_live", {
+      now: Date.now(),
+      live_window_ms: LLM_LIVE_PULSE_MS,
+      recent_window_ms: LLM_RECENT_WINDOW_MS,
+      by_caller: Object.fromEntries(llmUsageMap),
+    });
     fetchUsage().then((u) => sseSend(res, "usage", u));
     fetchPlanUsage().then((p) => sseSend(res, "plan_usage", p));
     req.on("close", () => sseClients.delete(res));

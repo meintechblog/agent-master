@@ -196,10 +196,18 @@
     color: var(--text-dim);
     font-size: 12px;
   }
-  /* LLM live-usage indicator dots (right side of tab) */
+  /* LLM live-usage indicator dots (right side of tab) — flex wrapper holds
+     multiple dots, one per model the caller used in the 24h window. */
+  .tab-llm-dots {
+    margin-left: auto;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    flex-shrink: 0;
+  }
   .llm-dot {
     width: 8px; height: 8px; border-radius: 50%;
-    margin-left: auto; flex-shrink: 0;
+    flex-shrink: 0;
     position: relative; cursor: help;
     transition: transform 0.15s;
   }
@@ -1396,7 +1404,7 @@ async function refreshLlmLive() {
 }
 
 let llmTooltipEl = null;
-function showLlmTooltip(evt, caller) {
+function showLlmTooltip(evt, caller, focusedModel) {
   const usage = llmLive.by_caller?.[caller];
   if (!usage) return;
   if (!llmTooltipEl) {
@@ -1408,13 +1416,21 @@ function showLlmTooltip(evt, caller) {
   const ageStr = ageSec < 60 ? `${ageSec}s ago` : ageSec < 3600 ? `${Math.round(ageSec/60)}min ago` : `${Math.round(ageSec/3600)}h ago`;
   const avgLat = usage.latencies?.length ? Math.round(usage.latencies.reduce((a,b)=>a+b,0)/usage.latencies.length) : 0;
   const fmtT = (n) => n >= 1000 ? (n/1000).toFixed(1) + "k" : Math.round(n);
-  const models = Object.entries(usage.by_model || {}).sort((a,b)=>b[1]-a[1]).map(([m,c]) => `<div class="row"><span class="k">${m}</span><span class="v">${c}× call${c===1?"":"s"}</span></div>`).join("");
+  const focusedCount = usage.by_model?.[focusedModel] || 0;
+  const models = Object.entries(usage.by_model || {}).sort((a,b)=>b[1]-a[1]).map(([m,c]) => {
+    const isFocus = m === focusedModel;
+    const dotColor = m === "sonnet" ? "#8e44ad" : m === "haiku" ? "#3498db" : m === "opus" ? "#e67e22" : "#95a5a6";
+    return `<div class="row" style="${isFocus ? "background:rgba(255,255,255,0.04);margin:0 -6px;padding:2px 6px;border-radius:3px" : ""}">
+      <span class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:6px;vertical-align:middle"></span>${m}${isFocus ? " ←" : ""}</span>
+      <span class="v">${c}× call${c===1?"":"s"}</span>
+    </div>`;
+  }).join("");
   llmTooltipEl.innerHTML = `
-    <div class="head">🧠 ${caller} → LLM Gateway</div>
-    <div class="row"><span class="k">calls (24h)</span><span class="v">${usage.calls}</span></div>
-    <div class="row"><span class="k">tokens</span><span class="v">${fmtT(usage.total_tokens)}</span></div>
-    <div class="row"><span class="k">last call</span><span class="v">${ageStr}</span></div>
-    <div class="row"><span class="k">last model</span><span class="v">${usage.last_call_model || "?"}</span></div>
+    <div class="head">🧠 ${caller} · ${focusedModel}</div>
+    <div class="row"><span class="k">calls via ${focusedModel}</span><span class="v">${focusedCount}</span></div>
+    <div class="row"><span class="k">total calls (24h)</span><span class="v">${usage.calls}</span></div>
+    <div class="row"><span class="k">total tokens</span><span class="v">${fmtT(usage.total_tokens)}</span></div>
+    <div class="row"><span class="k">last call</span><span class="v">${ageStr} (${usage.last_call_model || "?"})</span></div>
     <div class="row"><span class="k">avg latency</span><span class="v">${avgLat}ms</span></div>
     <div class="models">${models}</div>
   `;
@@ -1665,21 +1681,31 @@ function renderTabs() {
     btn.className = "tab" + (active === key ? " active" : "");
     const usage = llmLive.by_caller?.[key];
     const now = llmLive.now || Date.now();
-    let dotHtml = "";
+    let dotsHtml = "";
     if (usage) {
       const age = now - (usage.last_call_at || 0);
-      const live = age < (llmLive.live_window_ms || 15000);
-      const recent = !live && age < (llmLive.recent_window_ms || 86400000);
-      if (live || recent) {
-        const model = usage.last_call_model || "sonnet";
-        dotHtml = `<span class="llm-dot model-${model} ${live ? "live" : "recent"}" data-caller="${key}" onmouseenter="showLlmTooltip(event, '${key}')" onmouseleave="hideLlmTooltip()"></span>`;
-      }
+      const liveWindow = llmLive.live_window_ms || 15000;
+      const recentWindow = llmLive.recent_window_ms || 86400000;
+      const lastModel = usage.last_call_model;
+      // One dot per model the caller used in the 24h window, ordered by call count desc.
+      const models = Object.entries(usage.by_model || {})
+        .sort((a, b) => b[1] - a[1]);
+      dotsHtml = models
+        .filter(([, count]) => count > 0)
+        .map(([model]) => {
+          // Only the most-recently-used model's dot pulses, others static.
+          const isLast = model === lastModel;
+          const live = isLast && age < liveWindow;
+          const recent = !live && age < recentWindow;
+          const cls = `llm-dot model-${model} ${live ? "live" : recent ? "recent" : ""}`;
+          return `<span class="${cls}" data-caller="${key}" data-model="${model}" onmouseenter="showLlmTooltip(event, '${key}', '${model}')" onmouseleave="hideLlmTooltip()"></span>`;
+        })
+        .join("");
     }
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
-      <span class="tab-role">${agent.role}</span>
-      ${dotHtml}
+      <span class="tab-llm-dots">${dotsHtml}</span>
     `;
     btn.onclick = () => { active = key; render(); };
     tabs.appendChild(btn);
@@ -2651,6 +2677,10 @@ function connectSse() {
     planUsageData = JSON.parse(ev.data);
     renderUsage();
   });
+  es.addEventListener("llm_live", (ev) => {
+    llmLive = JSON.parse(ev.data);
+    if (typeof renderTabs === "function") renderTabs();
+  });
   es.onopen = () => setSsePill("● live", "live");
   es.onerror = () => {
     setSsePill("reconnecting…", "lost");
@@ -2667,13 +2697,10 @@ async function init() {
     active = live ? live[0] : Object.keys(state.agents)[0];
   } catch {}
   await refreshHealthInBackground();
-  await refreshLlmLive();
   render();
-  connectSse();
+  connectSse();   // SSE delivers llm_live too, no polling needed
   // refresh health every 5 min (it's cached server-side; client fetch triggers a soft refresh)
   setInterval(refreshHealthInBackground, 5 * 60 * 1000);
-  // LLM live usage every 5s — cheap in-memory endpoint, drives the per-tab dots
-  setInterval(refreshLlmLive, 5 * 1000);
   // re-render every minute to refresh the "letzte Aktualisierung" timestamp + sse age
   setInterval(render, 60 * 1000);
 }
