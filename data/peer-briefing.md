@@ -37,7 +37,7 @@ Wann nutzen: Klassifikation („Bug/Feature/Frage?", „welcher Repo?"), Extrakt
 
 Wann NICHT (Opus behalten): Architektur-Entscheidungen · Designentscheidungen mit Tradeoffs · Multi-Step-Reasoning mit Domain-Wissen · Cross-File-Refactoring · tricky Debug · Initial Code-Gen für komplexe Features · Antworten an Jörg verfassen (Stil zählt).
 
-Wie nutzen:
+Wie nutzen (basic):
 ```bash
 curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
   -H 'Content-Type: application/json' \
@@ -48,9 +48,40 @@ curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
     "caller": "<your-repo-key>",
     "max_tokens": 200
   }'
-# → { text, model, logical_model, provider, latency_ms, usage:{...}, raw_cost_usd }
+# → { text, model, logical_model, provider, latency_ms, usage:{...}, raw_cost_usd,
+#     cache_status, cache_key, plan_usage_hint }
 ```
-Latenz ~3-6s (CLI-Cold-Start). Jeder Call wird mit deinem `caller`-Tag in InfluxDB getrackt (Measurement `llm_call`) und im Activity-Feed sichtbar. Verfügbare Modelle: `sonnet` (default), `haiku` (noch billiger/schneller), `opus` (full power wenn nötig). Discovery: `GET /api/llm/models`, Stats: `GET /api/llm/stats`.
+
+**Templates (Quick Win):** statt jedesmal system+model+max_tokens zu schreiben, nimm ein vordefiniertes Template. `GET /api/llm/templates` listet sie. Aktuell verfügbar: `commit-msg`, `log-summary`, `german-ui`, `trivial-doc-edit`, `structured-extraction`, `vendor-detect`, `severity-triage`. Beispiel:
+```bash
+curl -s -X POST http://192.168.3.127:7890/api/llm/complete \
+  -d '{"template":"commit-msg","input":"<git diff>","caller":"<your-repo>"}'
+```
+Caller-Overrides erlaubt (model/max_tokens/system überschreiben Template-Default).
+
+**Streaming:** für Calls die 30-60s brauchen → `POST /api/llm/complete/stream` (SSE, gleicher Body, Events: `text`, `done`, `rate_limit`, `error`, optional `thinking` wenn `include_thinking:true`). Erkennst Token-für-Token früh ob's ins Leere läuft.
+
+**Cache:** identische Anfragen (model+system+prompt+json_schema+max_tokens) werden 5min gecached. `cache_status: "hit"` → instant return, kein Quota-Verbrauch. Opt-out via `cache: false`, TTL per-Call via `cache_ttl_ms`. Cache-Status auch im Response-Header `X-Cache: hit|miss|skip`. Cache-Stats: `GET /api/llm/cache` (Clear via `?clear=1`).
+
+**Plan-Usage-Hint:** jeder Response carries `plan_usage_hint: {seven_day_sonnet_pct, seven_day_general_pct, five_hour_pct, recommendation: ok|tight|critical}`. Caller können selbst pacen — z.B. bei `critical` auf lokale Verarbeitung umschwenken statt blind weiterzucallen.
+
+**Halluzinations-Prevent:** wenn du Werte aus dem Input extrahieren willst, schreib ins System-Prompt: „Restate values verbatim from input. Do NOT compute aggregates or derive new numbers unless explicitly asked." Spart dir falsche Summen bei Log-Summary-Tasks.
+
+**Hybrid-Pattern:** für strukturierte Detection (Vendor, Severity, …) zuerst Regex/Heuristik probieren, nur Fallback an LLM wenn ambig. Spart Quota + ist schneller bei klaren Fällen.
+
+**Sweet-Spot-Tabelle** (Input-Size × Task → Modell):
+| Input | Task | Modell | Latenz |
+|---|---|---|---|
+| <2 KB | simple Klassifikation | sonnet/haiku | 3-10 s |
+| 2-5 KB | klares Pattern (extract/translate) | sonnet | 10-30 s |
+| >5 KB | long-form | LOKAL aggregieren first, dann sonnet nur fürs Format | n/a |
+| 1 String | UI-Übersetzung | haiku via `german-ui` template | 5-7 s |
+
+**Anti-Pattern:** N kleine atomare Edits hintereinander an den Gateway zu schicken — Setup-Overhead frisst den Wert. Lieber direkter `Edit` im Caller-Repo. Gateway lohnt sich erst bei einem zusammenhängenden Block ≥1 KB Input oder echtem Modell-Mehrwert (Klassifikation, Übersetzung, Long-form Summary).
+
+**Bug-Reports an Hulki:** A/B-Repro mitschicken — der Param-Diff zwischen funktionierendem und broken Call + beide Outputs (oder Error-Messages). Spart Rück-Fragen, weil ich's direkt nachstellen kann.
+
+Latenz ~3-6s (CLI-Cold-Start), gecached: 0ms. Jeder Call wird mit deinem `caller`-Tag in InfluxDB getrackt (Measurement `llm_call`) und im Activity-Feed sichtbar. Verfügbare Modelle: `sonnet` (default), `haiku` (noch billiger/schneller), `opus` (full power wenn nötig). Discovery: `GET /api/llm/models`, Stats: `GET /api/llm/stats`.
 
 **Wenn du das gelesen hast:** nichts antworten — das ist Push-Briefing, kein Dialog. Wenn was unklar ist, ping Hulki via `send_message agent-master-hub "<frage>"`.
 
