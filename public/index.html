@@ -659,6 +659,80 @@
   }
   .test-result.ok  { background: rgba(0, 184, 148, 0.12); color: var(--green); border: 1px solid rgba(0, 184, 148, 0.3); }
   .test-result.err { background: rgba(214, 48, 49, 0.12); color: var(--red);   border: 1px solid rgba(214, 48, 49, 0.3); }
+
+  /* Briefing editor */
+  .briefing-editor textarea {
+    width: 100%;
+    min-height: 280px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .briefing-editor textarea:focus { outline: none; border-color: var(--accent); }
+  .briefing-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+  }
+  .briefing-actions .status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .briefed-list {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .briefed-list .bl-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+    border-top: 1px solid rgba(255,255,255,0.04);
+    font-size: 12px;
+  }
+  .briefed-list .bl-row:first-of-type { border-top: none; }
+  .briefed-list .bl-cwd {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text);
+  }
+  .briefed-list .bl-meta {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .briefed-list .bl-skip {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(139, 139, 154, 0.18);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .briefed-list button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .briefed-list button:hover { color: var(--text); border-color: var(--text-dim); }
   .skill-card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -1037,6 +1111,27 @@
         <button type="submit" class="btn btn-secondary">＋ Source anlegen</button>
       </div>
     </form>
+  </div>
+
+  <div class="settings-section briefing-editor">
+    <h2>👋 Peer-Briefing (Onboarding-Text)</h2>
+    <div class="section-hint">
+      Diese Markdown wird automatisch an jeden NEU gespawnten claude-peers-Peer geschickt (Onboarding mit Identität, Email, Hub-Konventionen, etc.).
+      Inhalt wird live aus <code>data/peer-briefing.md</code> gelesen — der nächste neue Peer kriegt die aktualisierte Version, ohne Restart.
+    </div>
+    <textarea id="briefing-text" spellcheck="false"></textarea>
+    <div class="briefing-actions">
+      <button class="btn btn-secondary" onclick="saveBriefing()">💾 Speichern</button>
+      <button class="btn btn-secondary" onclick="reloadBriefing()">↺ Verwerfen</button>
+      <button class="btn btn-secondary" onclick="rebriefAll()">📣 Alle Peers re-briefen</button>
+      <span class="status" id="briefing-status"></span>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <h2>📋 Bisher gebriefte Peers</h2>
+    <div class="section-hint">Jeder peer_id der schon ein Briefing bekommen hat. Re-briefen erzwingt einen erneuten Push (z. B. nach Edit oben).</div>
+    <div id="briefed-list-wrap"><div class="empty-tip">Lade…</div></div>
   </div>
 </section>
 
@@ -1540,7 +1635,7 @@ function switchView(v) {
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
-  if (v === "settings") loadSources();
+  if (v === "settings") { loadSources(); loadBriefing(); }
 }
 
 async function loadSkills(force) {
@@ -1997,6 +2092,121 @@ async function editSource(id, btn) {
   const data = await r.json();
   if (data.error) showToast("Fehler: " + data.error);
   else { showToast("Source aktualisiert"); loadSources(); }
+}
+
+// === Briefing editor ===
+
+let briefingLoaded = null;
+
+async function loadBriefing() {
+  const ta = document.getElementById("briefing-text");
+  const wrap = document.getElementById("briefed-list-wrap");
+  const status = document.getElementById("briefing-status");
+  if (!ta) return;
+  status.textContent = "lade…";
+  try {
+    const r = await fetch("/api/briefing");
+    const data = await r.json();
+    briefingLoaded = data.briefing_text || "";
+    ta.value = briefingLoaded;
+    status.textContent = `${data.briefing_bytes} bytes · ${data.history_count} Peers bisher gebrieft · poll ${Math.round((data.poll_interval_ms || 0) / 1000)}s`;
+    renderBriefedList(data.history || {});
+  } catch (e) {
+    status.textContent = "Fehler: " + e.message;
+    wrap.innerHTML = `<div class="empty-tip" style="color:var(--red)">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderBriefedList(history) {
+  const wrap = document.getElementById("briefed-list-wrap");
+  const entries = Object.entries(history)
+    .sort((a, b) => new Date(b[1].briefed_at) - new Date(a[1].briefed_at));
+  if (!entries.length) {
+    wrap.innerHTML = `<div class="empty-tip">Noch keine Peers gebrieft.</div>`;
+    return;
+  }
+  wrap.innerHTML = `<div class="briefed-list">${entries.map(([pid, info]) => {
+    const skipBadge = info.skipped ? `<span class="bl-skip" title="übersprungen — kein Push">${escapeHtml(info.skipped)}</span>` : "";
+    const cwd = (info.cwd || "?").replace("/Users/hulki/codex/", "");
+    return `<div class="bl-row">
+      <div>
+        <div class="bl-cwd">${escapeHtml(cwd)}</div>
+        <div class="bl-meta">peer ${escapeHtml(pid)} · ${escapeHtml(info.briefed_at?.slice(0, 19) || "?")}Z</div>
+      </div>
+      ${skipBadge}
+      <div></div>
+      ${info.skipped ? `<div></div>` : `<button onclick="rebriefOne('${escapeHtml(pid)}')" title="Briefing nochmal an diesen Peer">📣 Re-Brief</button>`}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function saveBriefing() {
+  const ta = document.getElementById("briefing-text");
+  const status = document.getElementById("briefing-status");
+  const text = ta.value;
+  if (!text.trim()) { status.textContent = "leer — abgebrochen"; return; }
+  status.textContent = "speichere…";
+  try {
+    const r = await fetch("/api/briefing", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await r.json();
+    if (data.error) { status.textContent = "Fehler: " + data.error; return; }
+    briefingLoaded = text;
+    status.textContent = `✓ gespeichert (${data.bytes} bytes)`;
+    showToast("Briefing aktualisiert");
+  } catch (e) {
+    status.textContent = "Fehler: " + e.message;
+  }
+}
+
+function reloadBriefing() {
+  if (!briefingLoaded) { loadBriefing(); return; }
+  document.getElementById("briefing-text").value = briefingLoaded;
+  document.getElementById("briefing-status").textContent = "↺ verworfen";
+}
+
+async function rebriefOne(peerId) {
+  const status = document.getElementById("briefing-status");
+  status.textContent = `re-briefe ${peerId}…`;
+  try {
+    const r = await fetch("/api/briefing/rebrief", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer_id: peerId }),
+    });
+    const data = await r.json();
+    if (data.error) { status.textContent = "Fehler: " + data.error; return; }
+    const sent = data.results?.filter(r => r.sent).length || 0;
+    status.textContent = `✓ ${sent}/${data.rebriefed} geschickt`;
+    showToast(`Re-Brief: ${sent} Push${sent === 1 ? "" : "s"}`);
+    loadBriefing();
+  } catch (e) {
+    status.textContent = "Fehler: " + e.message;
+  }
+}
+
+async function rebriefAll() {
+  if (!confirm("Alle aktuell online sind Peers neu briefen? (Übersprungene/Hulki bleiben außen vor.)")) return;
+  const status = document.getElementById("briefing-status");
+  status.textContent = "re-briefe alle…";
+  try {
+    const r = await fetch("/api/briefing/rebrief", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ all: true }),
+    });
+    const data = await r.json();
+    if (data.error) { status.textContent = "Fehler: " + data.error; return; }
+    const sent = data.results?.filter(r => r.sent).length || 0;
+    status.textContent = `✓ ${sent}/${data.rebriefed} geschickt`;
+    showToast(`Re-Brief alle: ${sent} Push${sent === 1 ? "" : "s"}`);
+    loadBriefing();
+  } catch (e) {
+    status.textContent = "Fehler: " + e.message;
+  }
 }
 
 async function submitNewSource() {

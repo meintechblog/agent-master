@@ -1408,6 +1408,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/skills/body",      purpose: "full SKILL.md body (post-frontmatter) for one skill — for the UI detail panel",
           query: { path: "absolute path returned by /api/skills (must be under ~/.claude/skills/ or ~/.claude/plugins/cache/)" } },
         { method: "GET",  path: "/api/briefing",         purpose: "current peer-briefing text + history of who has been briefed" },
+        { method: "PUT",  path: "/api/briefing",         purpose: "update the peer-briefing.md content. body: { text } — next-spawned peer gets new version automatically" },
         { method: "POST", path: "/api/briefing/rebrief", purpose: "re-send briefing to one peer (or all). body: { peer_id } | { cwd } | { all: true }" },
         { method: "GET",  path: "/api/skill-usage",      purpose: "loop state + InfluxDB target. Scans transcripts every 5 min, ships Skill tool_use events.",
           query: { trigger: "1 to fire the scan once now (still respects --since-ms overlap)" } },
@@ -1582,6 +1583,21 @@ async function handleApi(req, res, url) {
       lookback_ms: SKILL_USAGE_LOOKBACK_MS,
       state: skillUsageState,
     });
+  }
+
+  // Update the briefing markdown from the UI. Wraps fs.writeFile with a
+  // single audit event so changes show up in the activity feed.
+  if (req.method === "PUT" && url.pathname === "/api/briefing") {
+    const body = await readBody();
+    if (!body) return send(400, { error: "invalid_json" });
+    if (typeof body.text !== "string" || !body.text.trim()) return send(400, { error: "missing_text" });
+    try {
+      await fs.writeFile(BRIEFING_MD_PATH, body.text);
+      auditEvent("briefing.edit", { target: "peer-briefing.md", bytes: String(body.text.length) }, `Briefing-MD aktualisiert (${body.text.length} bytes)`).catch(() => {});
+      return send(200, { ok: true, bytes: body.text.length, path: BRIEFING_MD_PATH });
+    } catch (err) {
+      return send(500, { error: "write_failed", reason: err.message });
+    }
   }
 
   // Briefing inspector: current MD content + log of who was briefed when.
