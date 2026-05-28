@@ -214,15 +214,29 @@
   .llm-dot.model-sonnet { background: #8e44ad; box-shadow: 0 0 0 0 rgba(142, 68, 173, 0.6); }
   .llm-dot.model-haiku  { background: #3498db; box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.6); }
   .llm-dot.model-opus   { background: #e67e22; box-shadow: 0 0 0 0 rgba(230, 126, 34, 0.6); }
+  /* External backends (klick=Qwen on Jonas' Mac, ollama-local) — picked colors
+     that stay legible on the dark sidebar and are visually distinct from
+     Anthropic's purple/blue/orange triad. */
+  .llm-dot.model-klick  { background: #1abc9c; box-shadow: 0 0 0 0 rgba(26, 188, 156, 0.6); }
+  .llm-dot.model-local  { background: #7f8c8d; box-shadow: 0 0 0 0 rgba(127, 140, 141, 0.6); }
+  .llm-dot.model-other  { background: #95a5a6; box-shadow: 0 0 0 0 rgba(149, 165, 166, 0.6); }
   .llm-dot.live {
     animation: llm-pulse 1.4s ease-out infinite;
   }
   .llm-dot.recent { opacity: 0.55; }
+  /* Pulse uses currentColor so each model's dot keeps its own halo color.
+     Each .model-* below sets `color:` to match its background. */
   @keyframes llm-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(142, 68, 173, 0.7); transform: scale(1); }
-    70%  { box-shadow: 0 0 0 6px rgba(142, 68, 173, 0); transform: scale(1.15); }
-    100% { box-shadow: 0 0 0 0 rgba(142, 68, 173, 0); transform: scale(1); }
+    0%   { box-shadow: 0 0 0 0 currentColor; transform: scale(1); }
+    70%  { box-shadow: 0 0 0 6px transparent; transform: scale(1.15); }
+    100% { box-shadow: 0 0 0 0 transparent; transform: scale(1); }
   }
+  .llm-dot.model-sonnet.live { color: rgba(142, 68, 173, 0.6); }
+  .llm-dot.model-haiku.live  { color: rgba(52, 152, 219, 0.6); }
+  .llm-dot.model-opus.live   { color: rgba(230, 126, 34, 0.6); }
+  .llm-dot.model-klick.live  { color: rgba(26, 188, 156, 0.6); }
+  .llm-dot.model-local.live  { color: rgba(127, 140, 141, 0.6); }
+  .llm-dot.model-other.live  { color: rgba(149, 165, 166, 0.6); }
   /* Custom tooltip rendered on hover (replaces native title= because that lags) */
   .llm-tooltip {
     position: fixed;
@@ -1403,6 +1417,39 @@ async function refreshLlmLive() {
   } catch {}
 }
 
+// Map any logical_model name (sonnet, haiku, klick:best, local:llama3, …)
+// to a stable CSS-class suffix + tooltip hex color. Prefixed models
+// (klick:*, local:*) share a class/color with their backend so the sidebar
+// stays readable even as we add more backends.
+function llmModelClass(model) {
+  if (!model) return "other";
+  if (model === "sonnet" || model === "haiku" || model === "opus") return model;
+  const colon = model.indexOf(":");
+  if (colon < 0) return "other";
+  const prefix = model.slice(0, colon);
+  if (prefix === "local" || prefix === "klick") return prefix;
+  return "other";
+}
+function llmModelColor(model) {
+  const cls = llmModelClass(model);
+  return ({
+    sonnet: "#8e44ad",
+    haiku:  "#3498db",
+    opus:   "#e67e22",
+    klick:  "#1abc9c",
+    local:  "#7f8c8d",
+    other:  "#95a5a6",
+  })[cls];
+}
+// Short, readable label for tooltip rows ("klick:best" → "klick · best",
+// "local:llama3.3" → "local · llama3.3"). Keeps full model intact for the
+// underlying CSS-class matching.
+function llmModelLabel(model) {
+  const colon = model?.indexOf(":");
+  if (colon == null || colon < 0) return model;
+  return model.slice(0, colon) + " · " + model.slice(colon + 1);
+}
+
 let llmTooltipEl = null;
 function showLlmTooltip(evt, caller, focusedModel) {
   const usage = llmLive.by_caller?.[caller];
@@ -1419,9 +1466,9 @@ function showLlmTooltip(evt, caller, focusedModel) {
   const focusedCount = usage.by_model?.[focusedModel] || 0;
   const models = Object.entries(usage.by_model || {}).sort((a,b)=>b[1]-a[1]).map(([m,c]) => {
     const isFocus = m === focusedModel;
-    const dotColor = m === "sonnet" ? "#8e44ad" : m === "haiku" ? "#3498db" : m === "opus" ? "#e67e22" : "#95a5a6";
+    const dotColor = llmModelColor(m);
     return `<div class="row" style="${isFocus ? "background:rgba(255,255,255,0.04);margin:0 -6px;padding:2px 6px;border-radius:3px" : ""}">
-      <span class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:6px;vertical-align:middle"></span>${m}${isFocus ? " ←" : ""}</span>
+      <span class="k"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:6px;vertical-align:middle"></span>${llmModelLabel(m)}${isFocus ? " ←" : ""}</span>
       <span class="v">${c}× call${c===1?"":"s"}</span>
     </div>`;
   }).join("");
@@ -1700,7 +1747,9 @@ function renderTabs() {
           const isLast = model === lastModel;
           const live = isLast && age < liveWindow;
           const recent = !live && age < recentWindow;
-          const cls = `llm-dot model-${model} ${live ? "live" : recent ? "recent" : ""}`;
+          // Use the class mapper so klick:best → .model-klick (CSS-safe; the
+          // raw colon would break selector parsing).
+          const cls = `llm-dot model-${llmModelClass(model)} ${live ? "live" : recent ? "recent" : ""}`;
           return `<span class="${cls}" data-caller="${key}" data-model="${model}" onmouseenter="showLlmTooltip(event, '${key}', '${model}')" onmouseleave="hideLlmTooltip()"></span>`;
         })
         .join("");
