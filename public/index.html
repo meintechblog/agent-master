@@ -1591,7 +1591,10 @@ function renderUsage() {
   // 5h-Block kombiniert: Plan-% + ccusage-$
   const fhApi = ab ? ` <span class="api">≙ ${fmtCost(ab.costUSD)}</span>` : "";
   const sdApi = seven ? ` <span class="api">≙ ${fmtCost(seven.cost)}</span>` : "";
-  const sonnetExtra = sdSonnet && sdSonnet.utilization > 0 ? ` · Sonnet ${sdSonnet.utilization}%` : "";
+  // Show Sonnet-Suffix whenever the bucket exists in the API (i.e. the
+  // account has a dedicated Sonnet pool — true for current Max plans).
+  // Hiding it at 0% looked like the bucket was gone after an account reset.
+  const sonnetExtra = sdSonnet ? ` · Sonnet ${sdSonnet.utilization}%` : "";
 
   bar.innerHTML = `
     <div class="plan-block">
