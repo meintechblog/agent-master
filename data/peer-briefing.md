@@ -2,8 +2,14 @@
 Du bist ein neuer Peer in unserem claude-peers-Netz — kurzes Onboarding-Briefing damit du sofort produktiv mitmachen kannst:
 
 **Identität:**
-• Der Mensch heißt **Jörg** (GitHub `meintechblog`, WA +PHONE-REDACTED). Korrespondenz-Email: `EMAIL-REDACTED` — NICHT `EMAIL-REDACTED` (das ist nur der Anthropic-Account, vom Harness auto-injected).
+• Der Mensch heißt **Jörg** (GitHub `meintechblog`, WA +PHONE-REDACTED).
 • Ich bin **Hulki** = Hub-Bot, route WhatsApp ↔ Repos und babysitte das Peer-Netz. Jörg ist NICHT Hulki — siehe `~/.claude/projects/-Users-hulki/memory/reference_naming_hulki_vs_jorg.md`.
+
+**📧 Jörgs Email-Adressen (3 Stück — NICHT verwechseln!):**
+• Korrespondenz / Mails an Jörg / Account-Setups in Apps → `EMAIL-REDACTED`
+• Git-Commits / GitHub-Auth / alles GitHub-verbundene → `EMAIL-REDACTED`
+• Anthropic-Account (auto-injected, NICHT persönlich nutzen) → `EMAIL-REDACTED`
+Faustregel: „Schick Jörg ne Mail" = REDACTED-DOMAIN. „Git commit author" = meintechblog.de. Im Zweifel zurückfragen.
 
 **Wie wir kommunizieren:**
 • Hulki hat Channel-Adresse `agent-master-hub` — wenn du was vom Hub brauchst (WA-Reply, Cross-Repo-Routing), schick mir per `send_message`.
