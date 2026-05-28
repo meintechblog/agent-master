@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
-import { complete as llmComplete, listModels as llmListModels } from "./lib/llm-gateway.mjs";
+import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels } from "./lib/llm-gateway.mjs";
 import { listTemplates as llmListTemplates } from "./lib/llm-templates.mjs";
 
 // === LLM live-usage tracking (in-memory, for sidebar dots) ===
@@ -1945,6 +1945,7 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/agents/create",    purpose: "scaffold + auto-spawn a brand-new agent workspace (~/codex/<name>/ + git init + registry append)", body: { name: "<kebab-case>", mission: "<10-500 chars>" } },
         { method: "GET",  path: "/api/llm/models",       purpose: "list available logical models (sonnet/haiku/opus) + their providers" },
         { method: "POST", path: "/api/llm/complete",     purpose: "delegate a single-shot LLM completion to a cheaper model (default: sonnet) — runs via local `claude` CLI against Jörgs Pro/Max-plan, NO extra API costs", body: { model: "sonnet|haiku|opus|local:<n>", prompt: "<str>", system: "<str?>", max_tokens: 1024, json_schema: "{}?", caller: "<your-repo-key>", template: "<optional template name, see /api/llm/templates>" } },
+        { method: "POST", path: "/api/llm/complete/stream", purpose: "same as /api/llm/complete but streams tokens as SSE — events: text, thinking (if include_thinking:true), rate_limit, done, error", body: { model: "sonnet|haiku|opus", prompt: "<str>", caller: "<your-repo>", template: "<optional>", include_thinking: "false" } },
         { method: "GET",  path: "/api/llm/templates",    purpose: "list available prompt-templates (commit-msg, log-summary, german-ui, …) — pass ?include_system=1 to see full system prompts" },
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
@@ -2411,6 +2412,60 @@ async function handleApi(req, res, url) {
       auditEvent("llm.call.fail", { target: caller, model: parsed.model || "?" }, `LLM FAIL ${caller}: ${e.message.slice(0, 80)}`).catch(() => {});
       return send(500, { error: "llm_failed", reason: String(e.message) });
     }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/llm/complete/stream") {
+    // SSE stream: forward each text/thinking delta as its own event. Final
+    // `done` event carries the full result object (same shape as POST /complete).
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    const caller = String(parsed.caller || "unknown").slice(0, 60);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(`: stream open\n\n`);
+    let closed = false;
+    req.on("close", () => { closed = true; });
+    const writeEvent = (event, data) => {
+      if (closed) return;
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    try {
+      const result = await llmCompleteStream(parsed, (ev) => {
+        if (ev.type === "text")      writeEvent("text", { text: ev.text });
+        else if (ev.type === "thinking") writeEvent("thinking", { text: ev.text });
+        else if (ev.type === "rate_limit") writeEvent("rate_limit", ev.info || {});
+        else if (ev.type === "done") writeEvent("done", ev.result);
+        else if (ev.type === "error") writeEvent("error", { error: ev.error });
+      });
+      bumpLlmUsage(caller, result.logical_model, result.usage.total_tokens, result.latency_ms);
+      auditEvent("llm.call", {
+        target: caller,
+        model: result.logical_model || parsed.model || "?",
+        provider: result.provider,
+      }, `LLM ${result.logical_model} ← ${caller} (stream, ${result.usage.total_tokens}t, ${result.latency_ms}ms)`).catch(() => {});
+      writeInfluxLines([
+        `llm_call,caller=${escTagValue(caller)},model=${escTagValue(result.logical_model)},provider=${escTagValue(result.provider)} `
+        + `input_tokens=${result.usage.input_tokens}i,`
+        + `cache_creation_tokens=${result.usage.cache_creation_input_tokens}i,`
+        + `cache_read_tokens=${result.usage.cache_read_input_tokens}i,`
+        + `output_tokens=${result.usage.output_tokens}i,`
+        + `total_tokens=${result.usage.total_tokens}i,`
+        + `latency_ms=${result.latency_ms}i,`
+        + `raw_cost_usd=${result.raw_cost_usd || 0} `
+        + `${BigInt(Date.now()) * 1_000_000n}`
+      ]).catch(() => {});
+      if (!closed) res.end();
+    } catch (e) {
+      writeEvent("error", { error: String(e.message) });
+      auditEvent("llm.call.fail", { target: caller, model: parsed.model || "?" }, `LLM FAIL stream ${caller}: ${e.message.slice(0, 80)}`).catch(() => {});
+      if (!closed) res.end();
+    }
+    return;
   }
 
   if (req.method === "GET" && url.pathname === "/api/llm/stats") {
