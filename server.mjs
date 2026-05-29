@@ -2879,6 +2879,10 @@ async function handleApi(req, res, url) {
     if (!parsed.agent) return send(400, { error: "missing_agent" });
     const registry = await readRegistry();
     if (!registry.agents[parsed.agent]) return send(404, { error: "unknown_agent" });
+    // requested_by: "agent" when a peer asked to be stopped itself (Hulki policy:
+    // agent self-stop requests are ALWAYS honored + logged), "operator" otherwise.
+    const requestedBy = parsed.requested_by === "agent" ? "agent" : "operator";
+    const stopReason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 200) : "";
     try {
       const result = await stopAgent(parsed.agent, registry);
       // If a soft-stop was pending, clear it.
@@ -2887,10 +2891,14 @@ async function handleApi(req, res, url) {
         persistSoftStopState();
       }
       broadcastStatus();
-      auditEvent("stop.success", { target: parsed.agent }, `Stop: ${parsed.agent}`).catch(() => {});
+      auditEvent(
+        "stop.success",
+        { target: parsed.agent, requested_by: requestedBy },
+        `Stop (${requestedBy}): ${parsed.agent}${stopReason ? ` — ${stopReason}` : ""}`,
+      ).catch(() => {});
       return send(200, result);
     } catch (e) {
-      auditEvent("stop.fail", { target: parsed.agent }, `Stop FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
+      auditEvent("stop.fail", { target: parsed.agent, requested_by: requestedBy }, `Stop FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
       return send(500, { error: "stop_failed", reason: String(e.message) });
     }
   }

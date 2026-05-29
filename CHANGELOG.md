@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`POST /api/stop` records who requested the stop.** The endpoint now accepts optional `requested_by` (`"agent"` | `"operator"`, default `operator`) and `reason` (free text, ≤200 chars). Both are written into the `hub_events` audit point (`requested_by` as a tag, `reason` folded into the `msg` field) so agent-initiated self-stops are distinguishable from operator stops in the central InfluxDB. Implements the fleet policy "agent self-stop requests are always honored and logged" — an agent that has cleanly wrapped up (committed, pushed, resume-handoff written) asks the Hub to stop it, and the Hub does so without operator intervention while leaving an auditable trail.
 - **Master detail header shows live links instead of category badges.** The panel title used to render the role badge (`DOMAIN`/`Infra`/…) plus every `tag` chip (`pv`, `solaredge`, `modbus`, …) — noise for day-to-day use. It now shows a `🌐 <host>` link to the master's live web service (first http(s) URL in `live_dashboards`, fallback `health_check.url`) and a `GitHub ↗` link (`repo_url`), both opening in a new tab. Missing fields are simply omitted (no empty links). Capabilities/tags are still available in their own sections below.
 
 ### Added
