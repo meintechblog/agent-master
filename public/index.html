@@ -1159,6 +1159,18 @@
   .role-Bridge { background: rgba(78, 205, 196, 0.15); color: #4ecdc4; }
   .role-Domain { background: rgba(254, 202, 87, 0.15); color: #feca57; }
   .role-Infra { background: rgba(0, 210, 211, 0.15); color: #00d2d3; }
+  .hdr-link {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .hdr-link:hover { border-color: var(--accent); background: rgba(255,255,255,0.04); }
   .deploy-grid {
     display: grid;
     grid-template-columns: 130px 1fr;
@@ -1978,6 +1990,18 @@ function renderMqtt(m) {
   return `<div class="deploy-grid"><div class="k">pub</div><div class="mono">${pub}</div><div class="k">sub</div><div class="mono">${sub}</div></div>`;
 }
 
+// Primary live web URL of an agent: first http(s) URL in live_dashboards,
+// else health_check.url if it's an http URL. Returns null if none.
+function primaryWebUrl(a) {
+  for (const d of (a.live_dashboards || [])) {
+    const m = String(d).match(/https?:\/\/[^\s)]+/);
+    if (m) return m[0];
+  }
+  const hu = a.health_check && a.health_check.url;
+  if (hu && /^https?:\/\//.test(hu)) return hu;
+  return null;
+}
+
 function renderContent() {
   const main = document.getElementById("content");
   if (!active || !state.agents[active]) {
@@ -1991,7 +2015,11 @@ function renderContent() {
     .join("");
   const memrefs = (a.memory_refs || []).map((m) => `<span class="chip mono">${m}</span>`).join("");
   const caps = (a.capabilities || []).map((c) => `<span class="chip" style="border-color:${a.color || "var(--border)"}">${c}</span>`).join("");
-  const tags = (a.tags || []).map((t) => `<span class="chip" style="font-size:10px">${t}</span>`).join("");
+  const webUrl = primaryWebUrl(a);
+  const headerLinks = [
+    webUrl ? `<a class="hdr-link" href="${webUrl}" target="_blank" rel="noopener" title="Webdienst öffnen">🌐 ${webUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a>` : "",
+    a.repo_url ? `<a class="hdr-link" href="${a.repo_url}" target="_blank" rel="noopener" title="GitHub-Repo">GitHub ↗</a>` : "",
+  ].filter(Boolean).join("");
   const whenList = (a.when_to_use || []).map((w) => `<li>${w}</li>`).join("");
   const deps = (a.depends_on || []).map((d) => `<span class="chip">${d}</span>`).join("") || '<span class="empty-tip">keine</span>';
 
@@ -2024,8 +2052,7 @@ function renderContent() {
     <h2 class="panel-title">
       <span style="color:${a.color || "var(--text)"}">●</span>
       ${active}${displayName}
-      <span class="role-badge role-${a.role}">${a.role}</span>
-      ${tags}
+      ${headerLinks}
     </h2>
     <p class="panel-sub">${a.description}</p>
 

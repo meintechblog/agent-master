@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Master detail header shows live links instead of category badges.** The panel title used to render the role badge (`DOMAIN`/`Infra`/…) plus every `tag` chip (`pv`, `solaredge`, `modbus`, …) — noise for day-to-day use. It now shows a `🌐 <host>` link to the master's live web service (first http(s) URL in `live_dashboards`, fallback `health_check.url`) and a `GitHub ↗` link (`repo_url`), both opening in a new tab. Missing fields are simply omitted (no empty links). Capabilities/tags are still available in their own sections below.
+
 ### Added
 
 - **🧩 Skills tab in the UI.** A second top-level view next to the agent dashboard. Parses every `SKILL.md` under both `~/.claude/skills/<name>/` (user-scope skills) and `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<name>/SKILL.md` (plugin-skills like `browse:*` and `frontend-design:*`), reads the YAML frontmatter (`name`, `description`, `argument-hint`, `allowed-tools`), and renders one card per skill in a responsive grid. Plugin-skills are surfaced as `<plugin>:<name>` so the display matches how they're invoked. Cards are grouped into clusters (GSD / Browser / Frontend / Workflow / Utility) inferred from name prefix + plugin namespace. Toolbar: free-text search (matches name + description), cluster filter pills with counts, refresh button (bypasses the 5 min server-side cache). New endpoint `GET /api/skills?refresh=1` exposes the parsed index for other peers that want a programmatic view.
