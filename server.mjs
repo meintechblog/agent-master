@@ -2123,7 +2123,8 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/llm/cache",        purpose: "in-memory response-cache stats (hits/misses/size). ?clear=1 wipes the cache. Cache is keyed on SHA256(model+system+prompt+json_schema+max_tokens), default TTL 5min, override per-call via cache_ttl_ms or disable via cache:false" },
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
-        { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab)", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/peer/notify",      purpose: "reuse-or-spawn escalation: deliver a context message to a peer session (channel-message if alive, else spawn first then deliver). For external scripts that can only reach the hub over HTTP.", body: { repo: "<key>", context: "<message>", reuse_if_alive: true, spawn_if_offline: true, source: "<caller-id>?" } },
+        { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab). requested_by:'agent' marks an agent self-stop (always honored + logged).", body: { agent: "<key>", requested_by: "operator|agent", reason: "<text>?" } },
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
@@ -2855,6 +2856,65 @@ async function handleApi(req, res, url) {
       spawn: spawnResult,
       spawn_error: spawnError,
     });
+  }
+
+  // Reuse-or-spawn escalation: deliver a context message to a peer session,
+  // spawning it first if it's offline. Implements Jörg's escalation model
+  // ("Session lebt → nutzen, sonst spawnen") for external scripts that can only
+  // reach the hub over HTTP (e.g. the pv-inverter anomaly detector on .191).
+  if (req.method === "POST" && url.pathname === "/api/peer/notify") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    const repo = parsed.repo;
+    if (!repo || typeof repo !== "string") return send(400, { error: "missing_repo" });
+    const context = parsed.context;
+    if (!context || typeof context !== "string" || !context.trim()) {
+      return send(400, { error: "missing_context", hint: "context is the message body delivered to the peer session" });
+    }
+    const registry = await readRegistry();
+    const agent = registry.agents[repo];
+    if (!agent) return send(404, { error: "unknown_agent" });
+
+    const reuseIfAlive = parsed.reuse_if_alive !== false;     // default true
+    const spawnIfOffline = parsed.spawn_if_offline !== false; // default true
+    const source = typeof parsed.source === "string" ? parsed.source.slice(0, 80) : "";
+    const body = `📨 [peer/notify via Hulki-Hub${source ? ` · from ${source}` : ""}]\n${context.slice(0, 4000)}`;
+
+    try {
+      const peers = await fetchPeers();
+      const existing = peers.find((p) => p.cwd === agent.repo);
+
+      // Alive path.
+      if (existing) {
+        if (!reuseIfAlive) {
+          return send(409, { ok: false, delivered: false, action: "alive_no_reuse", peer_id: existing.id });
+        }
+        await sendChannelMessage(existing.id, body);
+        auditEvent("peer.notify", { target: repo, action: "reused", source }, `notify → ${repo} (alive)`).catch(() => {});
+        return send(200, { ok: true, delivered: true, action: "reused", peer_id: existing.id });
+      }
+
+      // Offline path.
+      if (!spawnIfOffline) {
+        auditEvent("peer.notify", { target: repo, action: "offline_no_spawn", source }, `notify → ${repo}: offline, spawn disabled`).catch(() => {});
+        return send(200, { ok: true, delivered: false, action: "offline_no_spawn" });
+      }
+
+      const result = await spawnAgent(repo, registry);
+      broadcastStatus();
+      if (!result.registered || !result.peer_id) {
+        // Spawned but the peer didn't register with the broker in time — caller
+        // should retry the notify in a few seconds once the session is up.
+        auditEvent("peer.notify", { target: repo, action: "spawned_pending", source }, `notify → ${repo}: spawned, registration pending`).catch(() => {});
+        return send(202, { ok: true, delivered: false, action: "spawned_pending", spawn: result, hint: "session spawned but not registered yet; retry notify in ~5s" });
+      }
+      await sendChannelMessage(result.peer_id, body);
+      auditEvent("peer.notify", { target: repo, action: "spawned", source }, `notify → ${repo} (spawned)`).catch(() => {});
+      return send(200, { ok: true, delivered: true, action: "spawned", peer_id: result.peer_id, window_id: result.windowId });
+    } catch (e) {
+      auditEvent("peer.notify.fail", { target: repo, source }, `notify FAIL ${repo}: ${e.message.slice(0, 80)}`).catch(() => {});
+      return send(500, { error: "notify_failed", reason: String(e.message) });
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/spawn") {
