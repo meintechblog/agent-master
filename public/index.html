@@ -2015,7 +2015,10 @@ function renderContent() {
     .join("");
   const memrefs = (a.memory_refs || []).map((m) => `<span class="chip mono">${m}</span>`).join("");
   const caps = (a.capabilities || []).map((c) => `<span class="chip" style="border-color:${a.color || "var(--border)"}">${c}</span>`).join("");
-  const webUrl = primaryWebUrl(a);
+  // The master's OWN web service. Authoritative field is `service_url`; the
+  // primaryWebUrl() fallback (live_dashboards/health_check) is transitional and
+  // can surface an external system the master only monitors — so service_url wins.
+  const webUrl = a.service_url || primaryWebUrl(a);
   const headerLinks = [
     webUrl ? `<a class="hdr-link" href="${webUrl}" target="_blank" rel="noopener" title="Webdienst öffnen">🌐 ${webUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a>` : "",
     a.repo_url ? `<a class="hdr-link" href="${a.repo_url}" target="_blank" rel="noopener" title="GitHub-Repo">GitHub ↗</a>` : "",
