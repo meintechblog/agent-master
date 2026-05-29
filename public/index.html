@@ -1492,6 +1492,23 @@
   </div>
   <div id="usage-kpis" class="usage-kpis"></div>
   <div id="usage-matrix-wrap"><div class="empty-tip">Lade Matrix…</div></div>
+
+  <div class="usage-head" style="margin-top:40px">
+    <div>
+      <h2 class="usage-title">Session-Verbrauch · Agent × Modell</h2>
+      <div class="section-hint">Tatsächlicher Token-Verbrauch der Claude-<strong>Sessions</strong> pro Agent × Modell im Zeitraum. Quelle: <code>ccusage</code> (Session-Transcripts) — zählt ALLE Agenten, nicht nur Gateway-Calls. Tagesgenau.</div>
+    </div>
+    <div class="usage-controls">
+      <div class="seg" id="session-range">
+        <button class="seg-btn"        data-srange="24h" onclick="setSessionRange('24h')">24 h</button>
+        <button class="seg-btn active"  data-srange="7d"  onclick="setSessionRange('7d')">7 Tage</button>
+        <button class="seg-btn"        data-srange="30d" onclick="setSessionRange('30d')">30 Tage</button>
+      </div>
+      <button class="btn btn-secondary" onclick="loadSessionUsage(true)">⟳</button>
+    </div>
+  </div>
+  <div id="session-kpis" class="usage-kpis"></div>
+  <div id="session-matrix-wrap"><div class="empty-tip">Lade Session-Matrix…</div></div>
 </section>
 
 <!-- Skill detail modal -->
@@ -2259,6 +2276,93 @@ function renderUsageMatrix() {
     + `<div class="usage-note">${usageStatsData.note || ""}</div>`;
 }
 
+// ── Session-Verbrauch (Agent × Modell) aus ccusage ──
+// Eigenständiges Panel: echter Session-Token-Verbrauch pro Agent, NICHT die
+// Gateway-Matrix. Quelle /api/session-usage (ccusage). Tagesgenau.
+let sessionRange = "7d";
+let sessionUsageData = null;
+
+function sRangeToSince(r) {
+  const d = new Date();
+  const days = r === "24h" ? 0 : r === "30d" ? 29 : 6;
+  d.setDate(d.getDate() - days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// "claude-opus-4-7" → "opus-4-7"; "claude-haiku-4-5-20251001" → "haiku-4-5"
+function shortModel(m) { return String(m).replace(/^claude-/, "").replace(/-20\d{6}$/, ""); }
+
+async function loadSessionUsage(force) {
+  const wrap = document.getElementById("session-matrix-wrap");
+  if (wrap && !sessionUsageData) wrap.innerHTML = `<div class="empty-tip">Lade Session-Matrix…</div>`;
+  try {
+    const since = sRangeToSince(sessionRange);
+    const r = await fetch(`/api/session-usage?since=${since}${force ? "&refresh=1" : ""}`);
+    sessionUsageData = await r.json();
+    renderSessionMatrix();
+  } catch (e) {
+    if (wrap) wrap.innerHTML = `<div class="empty-tip" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+function setSessionRange(r) {
+  sessionRange = r;
+  document.querySelectorAll("#session-range .seg-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.srange === r));
+  sessionUsageData = null;
+  loadSessionUsage(false);
+}
+
+function renderSessionMatrix() {
+  const wrap = document.getElementById("session-matrix-wrap");
+  const kpiBox = document.getElementById("session-kpis");
+  if (!wrap || !sessionUsageData) return;
+  const d = sessionUsageData;
+  if (d.error) { wrap.innerHTML = `<div class="empty-tip" style="color:var(--red)">${d.error}</div>`; kpiBox.innerHTML = ""; return; }
+  const matrix = d.matrix || {};
+  const names = d.names || {};
+  const agents = Object.keys(matrix);
+  const rowTotal = (c) => Object.values(matrix[c]).reduce((s, v) => s + (v.total_tokens || 0), 0);
+  agents.sort((a, b) => rowTotal(b) - rowTotal(a));
+
+  const colTotals = {};
+  for (const c of agents) for (const [m, v] of Object.entries(matrix[c])) colTotals[m] = (colTotals[m] || 0) + (v.total_tokens || 0);
+  const models = Object.keys(colTotals).sort((a, b) => colTotals[b] - colTotals[a]);
+
+  if (!agents.length || !models.length) {
+    wrap.innerHTML = `<div class="empty-tip">Keine Daten im Zeitraum.</div>`; kpiBox.innerHTML = ""; return;
+  }
+
+  let maxCell = 0;
+  for (const c of agents) for (const m of models) maxCell = Math.max(maxCell, matrix[c][m]?.total_tokens || 0);
+  const cellBg = (tok) => tok ? `rgba(123,108,255,${(0.08 + 0.55 * Math.sqrt(tok / maxCell)).toFixed(3)})` : "transparent";
+
+  const visTokens = d.totals?.total_tokens || agents.reduce((s, c) => s + rowTotal(c), 0);
+  const visCost = d.totals?.cost || 0;
+  kpiBox.innerHTML = [
+    [fmtTok(visTokens), "Tokens gesamt"],
+    [fmtUsd(visCost), "API-äquiv. Kosten"],
+    [String(agents.length), "Agenten"],
+    [String(models.length), "Modelle"],
+    [`${d.since} → ${d.until}`, "Zeitraum"],
+  ].map(([v, l]) => `<div class="kpi"><div class="kpi-v">${v}</div><div class="kpi-l">${l}</div></div>`).join("");
+
+  const dot = (c) => { const col = names[c]?.color; return col ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col};margin-right:7px;vertical-align:middle"></span>` : ""; };
+  const label = (c) => names[c]?.label || c;
+  const head = `<tr><th class="agent-col">Agent</th>${models.map((m) => `<th><span class="model-pill mp-claude">${shortModel(m)}</span></th>`).join("")}<th>Σ</th></tr>`;
+  const body = agents.map((c) => {
+    const cells = models.map((m) => {
+      const v = matrix[c][m]; const tok = v?.total_tokens || 0;
+      if (!tok) return `<td class="cell empty">·</td>`;
+      return `<td class="cell" style="background:${cellBg(tok)}" title="${label(c)} · ${m}\n${Math.round(tok).toLocaleString("de-DE")} tokens · ${fmtUsd(v.cost)}">${fmtTok(tok)}<span class="sub">${fmtUsd(v.cost)}</span></td>`;
+    }).join("");
+    return `<tr><td class="agent-col">${dot(c)}${label(c)}</td>${cells}<td class="cell"><strong>${fmtTok(rowTotal(c))}</strong></td></tr>`;
+  }).join("");
+  const foot = `<tr><td class="agent-col">Σ Modell</td>${models.map((m) => `<td class="cell"><strong>${fmtTok(colTotals[m])}</strong></td>`).join("")}<td class="cell"><strong>${fmtTok(visTokens)}</strong></td></tr>`;
+  wrap.innerHTML = `<div class="matrix-scroll"><table class="matrix"><thead>${head}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>`
+    + `<div class="usage-note">Token = input+output+cache (ccusage-Konvention; Cache-Reads dominieren die Summe). Kosten = API-äquivalenter Preis, real gegen deinen Plan abgerechnet. Tagesgenau — „24 h" = heutiges Datum.</div>`;
+}
+
 async function handleSpawn(key) {
   const main = document.getElementById("content");
   main.innerHTML = `<div class="empty-tip">⚡ Spawne ${key}… (~15s inkl. Dialog-Dismiss)</div>`;
@@ -2351,7 +2455,7 @@ function switchView(v) {
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
-  if (v === "usage")    loadUsageMatrix();
+  if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
 }
 

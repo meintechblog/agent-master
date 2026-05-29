@@ -1932,6 +1932,164 @@ async function fetchUsage(force = false) {
   }
 }
 
+// === Session usage (Agent × Model) from ccusage ===
+//
+// Unlike /api/llm/stats (which counts only programmatic LLM-gateway calls),
+// this reflects the ACTUAL Claude-session token burn per agent, sourced from
+// ccusage reading the local session transcripts. ccusage groups by `period`
+// (the ~/.claude/projects/ dir slug = one per repo/agent cwd); we map each
+// slug back to a registry agent. Date granularity is daily (ccusage --since/
+// --until take YYYY-MM-DD), so "24h" means "today".
+const SESSION_USAGE_CACHE_MS = 60 * 1000;
+const sessionUsageCache = new Map(); // `${since}|${until}` → { data, fetched_at }
+const ymdLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const isYmd = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+// Turn a project-dir slug into a readable fallback label when it doesn't match
+// a registry agent. "-Users-hulki-codex-foo-master" → "foo-master".
+function slugToLabel(slug) {
+  const m = String(slug).match(/^-Users-[^-]+-(?:codex|\.codex|codex-agent)-(.+)$/);
+  if (m) return m[1];
+  return String(slug).replace(/^-+/, "") || String(slug);
+}
+
+// Map every session-UUID to its project-dir slug by scanning the transcript
+// layout ~/.claude/projects/<slug>/<uuid>.jsonl. Cheap (filenames only, no
+// file reads). Returns an empty map if the dir is unreadable.
+const CLAUDE_PROJECTS_DIR = path.join(process.env.HOME || "", ".claude", "projects");
+async function buildSessionProjectMap() {
+  const map = new Map(); // uuid → project-dir slug
+  let dirs;
+  try {
+    dirs = await fs.readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  } catch {
+    return map;
+  }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    let files;
+    try {
+      files = await fs.readdir(path.join(CLAUDE_PROJECTS_DIR, d.name));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (f.endsWith(".jsonl")) map.set(f.slice(0, -6), d.name);
+    }
+  }
+  return map;
+}
+
+async function fetchSessionUsage(since, until, force = false) {
+  const cacheKey = `${since}|${until}`;
+  const now = Date.now();
+  const hit = sessionUsageCache.get(cacheKey);
+  if (!force && hit && now - hit.fetched_at < SESSION_USAGE_CACHE_MS) {
+    return { ...hit.data, cached: true, age_ms: now - hit.fetched_at };
+  }
+  try {
+    const args = ["--yes", "ccusage", "session", "--json", "--breakdown", "--since", since];
+    if (until) args.push("--until", until);
+    const out = await new Promise((resolve, reject) => {
+      const child = spawn("npx", args, {
+        env: { ...process.env, PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("error", (err) => reject(err));
+      child.on("close", (code) => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(`ccusage exit ${code}: ${stderr.slice(0, 200)}`));
+      });
+    });
+    const parsed = JSON.parse(out);
+    const sessions = Array.isArray(parsed.session) ? parsed.session : [];
+
+    // ccusage groups by session-UUID (the `period` field) and does NOT expose
+    // the project path. Resolve UUID → project-dir slug via the transcript
+    // layout ~/.claude/projects/<slug>/<uuid>.jsonl so we can roll many
+    // sessions up to one agent.
+    const uuidToSlug = await buildSessionProjectMap();
+
+    // Build slug → agent metadata from the registry (slug = repo path with "/" → "-").
+    const registry = await readRegistry();
+    const slugMap = new Map(); // slug → { key, label, color }
+    for (const [key, a] of Object.entries(registry.agents || {})) {
+      if (!a?.repo) continue;
+      const slug = a.repo.replace(/\//g, "-");
+      slugMap.set(slug, { key, label: a.display_name || key, color: a.color || null });
+    }
+
+    const matrix = {};   // key → model → { total_tokens, output_tokens, cost }
+    const byAgent = {};  // key → { total_tokens, output_tokens, cost }
+    const byModel = {};  // model → { total_tokens, output_tokens, cost }
+    const names = {};    // key → { label, color, slug }
+    const totals = { total_tokens: 0, output_tokens: 0, cost: 0 };
+    const blank = () => ({ total_tokens: 0, output_tokens: 0, cost: 0 });
+
+    for (const s of sessions) {
+      const period = s.period || "?";
+      // period is normally a session-UUID; resolve to its project slug. Legacy
+      // entries already carry the slug directly (start with "-"). Orphans with
+      // no transcript file land in an "unbekannt" bucket.
+      let slug = uuidToSlug.get(period);
+      if (!slug && period.startsWith("-")) slug = period;
+      const matched = slug ? slugMap.get(slug) : null;
+      const key = matched ? matched.key : (slug || "unbekannt");
+      names[key] = names[key] || {
+        label: matched ? matched.label : (slug ? slugToLabel(slug) : "unbekannt"),
+        color: matched ? matched.color : null,
+        slug: slug || null,
+      };
+      matrix[key] = matrix[key] || {};
+      byAgent[key] = byAgent[key] || blank();
+      const breakdowns = Array.isArray(s.modelBreakdowns) ? s.modelBreakdowns : [];
+      for (const mb of breakdowns) {
+        const model = mb.modelName || "?";
+        const tok = (mb.inputTokens || 0) + (mb.outputTokens || 0) + (mb.cacheCreationTokens || 0) + (mb.cacheReadTokens || 0);
+        const outp = mb.outputTokens || 0;
+        const cost = mb.cost || 0;
+        matrix[key][model] = matrix[key][model] || blank();
+        matrix[key][model].total_tokens += tok;
+        matrix[key][model].output_tokens += outp;
+        matrix[key][model].cost += cost;
+        byAgent[key].total_tokens += tok;
+        byAgent[key].output_tokens += outp;
+        byAgent[key].cost += cost;
+        byModel[model] = byModel[model] || blank();
+        byModel[model].total_tokens += tok;
+        byModel[model].output_tokens += outp;
+        byModel[model].cost += cost;
+        totals.total_tokens += tok;
+        totals.output_tokens += outp;
+        totals.cost += cost;
+      }
+    }
+
+    const payload = {
+      matrix,
+      by_agent: byAgent,
+      by_model: byModel,
+      names,
+      totals,
+      n_agents: Object.keys(matrix).length,
+      n_models: Object.keys(byModel).length,
+      since,
+      until: until || ymdLocal(new Date()),
+      generated_at: new Date().toISOString(),
+    };
+    sessionUsageCache.set(cacheKey, { data: payload, fetched_at: now });
+    return { ...payload, cached: false, age_ms: 0 };
+  } catch (e) {
+    if (hit) {
+      return { ...hit.data, cached: true, age_ms: now - hit.fetched_at, fetch_error: String(e.message) };
+    }
+    return { error: String(e.message), since, until: until || ymdLocal(new Date()), generated_at: new Date().toISOString() };
+  }
+}
+
 // Plain node:https probe that ignores self-signed cert errors. Used for
 // services with `allow_insecure: true` in their health_check. We do NOT
 // patch the global fetch dispatcher — keeping the bypass narrow to this
@@ -2488,6 +2646,18 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/plan-usage") {
     return send(200, await fetchPlanUsage(url.searchParams.get("refresh") === "1"));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/session-usage") {
+    // Per-agent × per-model Claude SESSION token usage from ccusage (not the
+    // LLM gateway). Date-granular: since/until are YYYY-MM-DD; defaults to the
+    // last 7 days. Aggregated server-side; cached 60s per (since,until).
+    const qSince = url.searchParams.get("since");
+    const qUntil = url.searchParams.get("until");
+    const since = isYmd(qSince) ? qSince : ymdLocal(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+    const until = isYmd(qUntil) ? qUntil : ymdLocal(new Date());
+    const force = url.searchParams.get("refresh") === "1";
+    return send(200, await fetchSessionUsage(since, until, force));
   }
 
   if (req.method === "GET" && url.pathname === "/api/health") {
