@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ctx-fill — print THIS Claude Code session's REAL context-window fill.
+#
+# WARUM: Das Modell bekommt seinen Context-Füllstand NICHT als Eingabe und kann
+# ihn nicht zuverlässig schätzen (LLMs verschätzen sich grob). Claude Code kennt
+# den echten Wert aber und reicht ihn an die Statusline-Hook (gsd-statusline.js),
+# die ihn in eine Bridge-Datei schreibt: <temp>/claude-ctx-<session_id>.json.
+# Dieses Script liest exakt diesen echten Wert — statt zu raten.
+# Siehe ~/.claude/CLAUDE.md → "Context-Window-Selbstcheck".
+#
+# Nutzung: einfach `ctx-fill` aufrufen. Exit 0 + Zeile "context: X% used, Y% remaining".
+set -uo pipefail
+
+sid="${CLAUDE_CODE_SESSION_ID:-}"
+if [ -z "$sid" ]; then
+  echo "ctx-fill: \$CLAUDE_CODE_SESSION_ID nicht gesetzt — bist du in einer Claude-Code-Session?" >&2
+  exit 2
+fi
+
+# Die Statusline läuft im Claude-Code-Hauptprozess und schreibt nach os.tmpdir().
+# Auf macOS ist das DARWIN_USER_TEMP_DIR (/var/folders/.../T), NICHT das vom
+# Shell überschriebene $TMPDIR (/tmp/claude-<uid>). Wir probieren mehrere Kandidaten.
+f=""
+for d in "$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)" "${TMPDIR:-}" "/tmp"; do
+  [ -n "$d" ] || continue
+  p="${d%/}/claude-ctx-${sid}.json"
+  if [ -f "$p" ]; then f="$p"; break; fi
+done
+
+if [ -z "$f" ]; then
+  echo "ctx-fill: keine Bridge-Datei für Session $sid gefunden (Statusline hat evtl. noch nicht gerendert)" >&2
+  exit 1
+fi
+
+node -e '
+  const fs = require("fs");
+  const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const age = Math.floor(Date.now() / 1000) - (m.timestamp || 0);
+  const stale = age > 60 ? ` (STALE: ${age}s alt — mach einen Tool-Call, dann neu lesen)` : "";
+  console.log(`context: ${m.used_pct}% used, ${m.remaining_percentage}% remaining${stale}`);
+' "$f"

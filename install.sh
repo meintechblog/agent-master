@@ -15,6 +15,7 @@ PLIST_LABEL="${AGENT_HUB_LABEL:-com.${USER}.agent-hub}"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 ZSHRC="$HOME/.zshrc"
 CLAUDEPEERS_BIN="$HOME/.local/bin/claudepeers"
+CTXFILL_BIN="$HOME/.local/bin/ctx-fill"
 
 # ── ANSI ─────────────────────────────────────────────────────────────────────
 c_blue='\033[1;34m'
@@ -40,6 +41,10 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   if [[ -f "$CLAUDEPEERS_BIN" ]]; then
     rm -f "$CLAUDEPEERS_BIN"
     ok "claudepeers wrapper removed ($CLAUDEPEERS_BIN)."
+  fi
+  if [[ -f "$CTXFILL_BIN" ]]; then
+    rm -f "$CTXFILL_BIN"
+    ok "ctx-fill helper removed ($CTXFILL_BIN)."
   fi
   warn "Repo at $INSTALL_DIR left in place (rm -rf manually if you want)."
   warn "PATH line in $ZSHRC left in place (delete the ~/.local/bin export manually if you want)."
@@ -154,6 +159,18 @@ interact
 WRAPPER
 chmod +x "$CLAUDEPEERS_BIN"
 ok "claudepeers wrapper installed. Open a new terminal (or 'source $ZSHRC') to pick it up."
+
+# ── ctx-fill helper ──────────────────────────────────────────────────────────
+# Lets any Claude Code session read its REAL context-window fill (from the
+# statusline bridge file via $CLAUDE_CODE_SESSION_ID) instead of guessing.
+if [[ -f "$INSTALL_DIR/bin/ctx-fill" ]]; then
+  log "Installing ctx-fill helper → $CTXFILL_BIN"
+  cp "$INSTALL_DIR/bin/ctx-fill" "$CTXFILL_BIN"
+  chmod +x "$CTXFILL_BIN"
+  ok "ctx-fill installed (run 'ctx-fill' in any session for 'X% used, Y% remaining')."
+else
+  warn "bin/ctx-fill not found in repo — skipping ctx-fill install."
+fi
 
 # ── LaunchAgent plist ────────────────────────────────────────────────────────
 log "Writing LaunchAgent plist → $PLIST_PATH"
