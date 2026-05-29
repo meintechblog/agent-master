@@ -1530,6 +1530,10 @@ async function spawnAgent(repoKey, registry) {
     delay 1
     tell application "Terminal"
       do script "cd ${cwd} && claudepeers" in selected tab of front window
+      -- Fixed tab title = agent key, so Jörg sees which agent lives in which tab
+      -- at a glance. Terminal.app's custom title overrides the cwd/process title
+      -- the shell + claude would otherwise set.
+      set custom title of selected tab of front window to "${repoKey}"
       return id of front window
     end tell
   `;
