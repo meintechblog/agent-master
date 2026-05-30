@@ -1468,6 +1468,26 @@
   }
   .chat-foot { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border, #333); }
   @media (max-width: 640px) { .chat-log { max-height: 50vh; } }
+  /* GitHub tracker UI */
+  .nav-badge {
+    display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 5px; border-radius: 9px;
+    background: var(--red, #e74c3c); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  }
+  .tab-gh {
+    margin-left: 6px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 9px;
+    background: rgba(231,76,60,0.18); color: var(--red, #e74c3c); white-space: nowrap;
+  }
+  .gh-btn { padding: 3px 9px; font-size: 11px; }
+  .gh-section { border: 1px solid rgba(231,76,60,0.4); border-radius: 10px; padding: 12px 14px; background: rgba(231,76,60,0.05); }
+  .gh-mini {
+    display: flex; align-items: center; gap: 10px; padding: 7px 0; flex-wrap: wrap;
+    border-bottom: 1px dashed rgba(255,255,255,0.07); font-size: 13px;
+  }
+  .gh-mini:last-child { border-bottom: none; }
+  .gh-mini-id { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .gh-mini-title { color: var(--text); text-decoration: none; flex: 1; min-width: 180px; }
+  .gh-mini-title:hover { color: var(--accent); text-decoration: underline; }
+  .gh-mini-acts { display: flex; gap: 4px; margin-left: auto; }
 
   /* Phone / portrait: make the dashboard usable on a narrow screen. */
   @media (max-width: 640px) {
@@ -1519,6 +1539,7 @@
   <div class="view-toggle">
     <button class="view-btn active" id="view-agents"   onclick="switchView('agents')">🛰 Agenten</button>
     <button class="view-btn"        id="view-matrix"   onclick="switchView('matrix')">🔲 Matrix</button>
+    <button class="view-btn"        id="view-github"   onclick="switchView('github')">📥 GitHub<span id="github-nav-badge" class="nav-badge" style="display:none"></span></button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
     <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
@@ -1662,6 +1683,28 @@
     </div>
   </div>
   <div id="matrix-wrap"><div class="empty-tip">Lade Matrix…</div></div>
+</section>
+
+<section id="github-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">📥 GitHub · offene Issues & PRs</h2>
+      <div class="section-hint">Stündlicher Scan aller Repos. Vertrauenswürdige Quellen → direkt an den Agenten. Andere → du entscheidest: durchreichen oder verwerfen. <span id="github-last-scan"></span></div>
+    </div>
+    <div class="usage-controls">
+      <button class="btn btn-secondary" onclick="forceGithubScan(this)">⟳ Jetzt scannen</button>
+    </div>
+  </div>
+  <div id="github-wrap"><div class="empty-tip">Lade…</div></div>
+  <div class="panel-section" style="margin-top:26px">
+    <h3>Whitelist · vertrauenswürdige GitHub-User</h3>
+    <div class="section-hint">Issues/PRs von diesen Usern werden direkt an den jeweiligen Agenten durchgereicht (autonome Umsetzung). Alle anderen → Telegram-Triage an dich.</div>
+    <div id="github-whitelist" class="chips" style="margin:10px 0"></div>
+    <div style="display:flex;gap:8px;max-width:420px">
+      <input id="github-wl-input" class="session-input" placeholder="GitHub-Username hinzufügen…" onkeydown="if(event.key==='Enter')addWhitelist()">
+      <button class="btn btn-secondary" onclick="addWhitelist()">+ Hinzufügen</button>
+    </div>
+  </div>
 </section>
 
 <!-- Skill detail modal -->
@@ -2097,9 +2140,12 @@ function renderTabs() {
     const idleHtml = idleMs != null
       ? `<span class="tab-idle ${idleMs > 5 * 60 * 1000 ? "idle-long" : ""}" title="seit letzter Terminal-Aktivität (idle / wartet)">⏱ ${formatIdle(idleMs)}</span>`
       : "";
+    const ghN = (typeof githubData !== "undefined" && githubData) ? githubOpenCountFor(key) : 0;
+    const ghHtml = ghN ? `<span class="tab-gh" title="${ghN} offene GitHub-Punkte (Issues/PRs)">📥${ghN}</span>` : "";
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
+      ${ghHtml}
       ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
       ${ssPending ? `<span class="tab-softstop" title="Soft-Stop läuft — klick zum Abbrechen" onclick="event.stopPropagation();handleSoftStopCancel('${key}')">💤↩︎</span>` : ""}
@@ -2279,6 +2325,8 @@ function renderContent() {
       ${a.live ? "" : `<span class="status-pill offline">○ offline</span>`}
       ${actionBtns}
     </div>
+
+    ${renderAgentGithubSection(active)}
 
     ${a.live ? `
     <div class="chat-panel">
@@ -2752,12 +2800,13 @@ async function refreshHealthInBackground() {
 
 function switchView(v, push = true) {
   view = v;
-  for (const k of ["agents", "matrix", "skills", "usage", "settings"]) {
+  for (const k of ["agents", "matrix", "github", "skills", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
   document.getElementById("agents-layout").style.display   = v === "agents"   ? "" : "none";
   document.getElementById("matrix-view").style.display     = v === "matrix"   ? "" : "none";
+  document.getElementById("github-view").style.display     = v === "github"   ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
@@ -2765,6 +2814,7 @@ function switchView(v, push = true) {
   if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
   if (v === "matrix") loadMatrix(false);
+  if (v === "github") loadGithub();
   if (v !== "agents") stopChatPoll();
   if (push) {
     const target = v === "agents" ? (active ? "/" + active : "/") : "/" + v;
@@ -2796,6 +2846,115 @@ window.addEventListener("resize", () => {
   clearTimeout(_resizeTabsT);
   _resizeTabsT = setTimeout(() => { if (state && state.agents) renderTabs(); }, 200);
 });
+
+// ── GitHub issue/PR tracker (📥 GitHub tab, per-agent badges, detail section) ──
+let githubData = null;
+const GH_OPEN = ["awaiting_triage", "delivered", "in_progress"];
+async function loadGithub() {
+  try { githubData = await (await fetch("/api/github/items")).json(); } catch { githubData = githubData || { items: {}, whitelist: [] }; }
+  renderGithub();
+  updateGithubBadges();
+}
+function githubOpenItems() {
+  return Object.values((githubData && githubData.items) || {}).filter((it) => GH_OPEN.includes(it.status));
+}
+function githubOpenCountFor(key) { return githubOpenItems().filter((it) => it.repo_key === key).length; }
+function updateGithubBadges() {
+  const n = githubOpenItems().length;
+  const nav = document.getElementById("github-nav-badge");
+  if (nav) { nav.textContent = n; nav.style.display = n ? "inline-block" : "none"; }
+  renderTabs();
+}
+function ghAge(iso) {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  const h = Math.floor(ms / 3600000);
+  if (h < 1) return Math.max(1, Math.floor(ms / 60000)) + "m";
+  if (h < 48) return h + "h";
+  return Math.floor(h / 24) + "d";
+}
+function ghStatusChip(s) {
+  const map = { awaiting_triage: ["wartet auf dich", "var(--yellow)"], delivered: ["zugestellt", "var(--accent,#6cf)"], in_progress: ["in Arbeit", "var(--accent,#6cf)"], done: ["erledigt", "var(--green)"], cancelled: ["verworfen", "var(--text-dim)"], closed_on_github: ["GitHub-closed", "var(--text-dim)"] };
+  const [label, col] = map[s] || [s, "var(--text-dim)"];
+  return `<span style="color:${col};font-weight:600">${label}</span>`;
+}
+function renderGithub() {
+  const wrap = document.getElementById("github-wrap");
+  const ls = document.getElementById("github-last-scan");
+  if (ls && githubData) ls.textContent = githubData.last_scan ? `· letzter Scan: ${new Date(githubData.last_scan).toLocaleString("de-DE")}` : "";
+  const wlBox = document.getElementById("github-whitelist");
+  if (wlBox) {
+    const wl = (githubData && githubData.whitelist) || [];
+    wlBox.innerHTML = wl.length ? wl.map((u) => `<span class="chip">@${escapeHtml(u)} <span style="cursor:pointer;color:var(--red,#e74c3c)" onclick="removeWhitelist('${u}')">✕</span></span>`).join("") : '<span class="empty-tip">leer</span>';
+  }
+  if (!wrap) return;
+  const items = Object.values((githubData && githubData.items) || {});
+  if (!items.length) { wrap.innerHTML = `<div class="empty-tip">Keine offenen Issues/PRs gefunden. 🎉</div>`; return; }
+  const rank = (s) => (GH_OPEN.includes(s) ? 0 : 1);
+  items.sort((a, b) => rank(a.status) - rank(b.status) || (b.first_seen || "").localeCompare(a.first_seen || ""));
+  const rows = items.map((it) => {
+    const open = GH_OPEN.includes(it.status);
+    const acts = [];
+    if (it.status === "awaiting_triage") acts.push(`<button class="btn btn-primary gh-btn" onclick="githubDeliver('${it.id}')" title="An den Agenten durchreichen">→ Agent</button>`);
+    if (open) {
+      acts.push(`<button class="btn btn-secondary gh-btn" onclick="githubSetStatus('${it.id}','done')">✓ erledigt</button>`);
+      acts.push(`<button class="btn btn-secondary gh-btn" onclick="githubSetStatus('${it.id}','cancelled')">✕ verwerfen</button>`);
+    }
+    acts.push(`<a class="btn btn-secondary gh-btn" href="${it.url}" target="_blank" rel="noopener">↗</a>`);
+    return `<tr>
+      <td><a class="agent-link" onclick="selectAgent('${it.repo_key}')">${it.repo_key}</a></td>
+      <td>${it.type === "pr" ? "PR" : "Issue"} #${it.number}</td>
+      <td style="max-width:340px;white-space:normal">${escapeHtml(it.title)}</td>
+      <td>@${escapeHtml(it.author)} ${it.trusted ? '<span style="color:var(--green)" title="whitelisted">✓</span>' : ""}</td>
+      <td>${ghStatusChip(it.status)}</td>
+      <td>${ghAge(it.first_seen)}</td>
+      <td style="white-space:nowrap">${acts.join(" ")}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="matrix-table">
+    <thead><tr><th>Agent</th><th>Typ</th><th>Titel</th><th>Autor</th><th>Status</th><th>Alter</th><th>Aktion</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+async function forceGithubScan(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "⟳ scanne… (kann ~30s dauern)"; }
+  try { await fetch("/api/github/scan", { method: "POST" }); } catch {}
+  await loadGithub();
+  if (btn) { btn.disabled = false; btn.textContent = "⟳ Jetzt scannen"; }
+}
+async function githubAction(url, body) {
+  try { await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); } catch {}
+  await loadGithub();
+  if (view === "agents") renderContent();
+}
+function githubSetStatus(id, status) {
+  if (status === "cancelled" && !confirm("Diesen Punkt verwerfen?")) return;
+  githubAction("/api/github/item-status", { id, status, by: "operator" });
+}
+function githubDeliver(id) { githubAction("/api/github/deliver", { id }); }
+function addWhitelist() {
+  const inp = document.getElementById("github-wl-input");
+  const u = (inp.value || "").trim().replace(/^@/, "");
+  if (!u) return;
+  inp.value = "";
+  githubAction("/api/github/whitelist", { add: u });
+}
+function removeWhitelist(u) { githubAction("/api/github/whitelist", { remove: u }); }
+// Compact open-items block for the agent detail panel (prominent, per agent).
+function renderAgentGithubSection(key) {
+  if (!githubData) return "";
+  const items = githubOpenItems().filter((it) => it.repo_key === key);
+  if (!items.length) return "";
+  const rows = items.map((it) => `<div class="gh-mini">
+    <span class="gh-mini-id">${it.type === "pr" ? "PR" : "Issue"} #${it.number}</span>
+    <a href="${it.url}" target="_blank" rel="noopener" class="gh-mini-title">${escapeHtml(it.title)}</a>
+    ${ghStatusChip(it.status)}
+    <span class="gh-mini-acts">
+      ${it.status === "awaiting_triage" ? `<button class="btn btn-primary gh-btn" onclick="githubDeliver('${it.id}')" title="An den Agenten durchreichen">→ Agent</button>` : ""}
+      <button class="btn btn-secondary gh-btn" onclick="githubSetStatus('${it.id}','done')">✓</button>
+      <button class="btn btn-secondary gh-btn" onclick="githubSetStatus('${it.id}','cancelled')">✕</button>
+    </span></div>`).join("");
+  return `<div class="panel-section gh-section"><h3>📥 Offene GitHub-Punkte (${items.length})</h3>${rows}</div>`;
+}
 
 let matrixUpdaters = null;
 async function loadMatrix(force) {
@@ -3573,6 +3732,9 @@ async function init() {
   // Hub self-update: check on load + every 30 min
   checkHubUpdate();
   setInterval(checkHubUpdate, 30 * 60 * 1000);
+  // GitHub tracker: load on start (for badges + detail section) + refresh every 5 min
+  loadGithub();
+  setInterval(loadGithub, 5 * 60 * 1000);
 }
 
 // Pause SSE when tab is hidden — saves usage-refresh churn when user not looking
