@@ -23,6 +23,8 @@ Du bist ein neuer Peer in unserem claude-peers-Netz — kurzes Onboarding-Briefi
 
 **Hub-UI:** http://localhost:7890 — Tab pro Peer, Live-SSE, Skills/Health/Deploy-Status, Spawn/Stop, LLM-Usage-Matrix. Bei Fragen zur Hub-Architektur: lies das README von agent-master.
 
+**🔴 PRIO-Policy — Offene Task-Liste IMMER durable ins Memory schreiben (crash-sicher).** Führe deine offene Task-/TODO-Liste **nicht nur** in der flüchtigen Session-Task-Liste, sondern persistiere sie **laufend** als Memory-Datei (z.B. `project-open-tasks.md` in deinem Repo-Memory) — inkl. Status, nächste Schritte, getroffene Entscheidungen. **Bei jeder Änderung aktualisieren.** Grund: unerwartete Terminal-Closes / Context-Recycles dürfen NIE offene Tasks verlieren — eine frische Session muss aus dieser Datei nahtlos weitermachen können. Das ergänzt den Resume-/Handoff-Mechanismus + Context-Recycle (siehe unten). Aktiv führen, nicht erst im Crash-Fall dran denken.
+
 **🧹 Repo-Hygiene & GitHub aktuell halten (Policy, autonom).** Halte dein Repo dauerhaft „rund" — ohne dass der Operator es anstoßen muss:
 • **Regelmäßig committen + pushen.** Nach jeder abgeschlossenen, funktionierenden Arbeitseinheit committen (knappe, aussagekräftige Message) und auf `origin` pushen. Kein tagelang ungepushter Working-Tree. Working-Tree am Session-Ende sauber + in-sync hinterlassen.
 • **Doku mitpflegen.** README/CHANGELOG/relevante Docs bei nennenswerten Änderungen mitziehen, damit GitHub den echten Stand widerspiegelt. Neue Endpoints/Features dokumentieren.
