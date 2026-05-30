@@ -1437,6 +1437,77 @@ async function writeRegistryAtomic(registry) {
   await fs.rename(tmp, REGISTRY_PATH);
 }
 
+// === Registry self-fill ===
+// Agents keep their OWN registry entry alive via POST /api/registry/self-update.
+// A scheduler nudges one live agent every 10 min (thinnest / least-recently
+// prompted first), so entries get populated initially and refreshed over time
+// without the operator hand-curating them. Offline agents aren't auto-spawned —
+// they get the same instruction in the spawn briefing and on their next online tick.
+const REGISTRY_FILL_PATH = path.join(__dirname, "data", "registry-fill.json");
+const REGISTRY_FILL_INTERVAL_MS = 10 * 60 * 1000;
+const REGISTRY_FILL_REFRESH_MS = 21 * 24 * 60 * 60 * 1000; // re-prompt a filled entry at most every ~3 weeks
+const REGISTRY_FILLABLE = new Set([
+  "capabilities", "when_to_use", "owned_endpoints", "mqtt_topics",
+  "depends_on", "tags", "description", "display_name", "service_url",
+  "live_dashboards", "repo_url",
+]);
+
+function registryEntryIsThin(a) {
+  const n = (x) => (Array.isArray(x) ? x.length : 0);
+  return n(a.capabilities) === 0 || n(a.when_to_use) === 0 || n(a.owned_endpoints) === 0;
+}
+
+function registryFillPrompt(key) {
+  return [
+    `[agent-master/Hub] Bitte halte deinen Eigen-Eintrag in der Hub-Registry aktuell — daran erkennen dich andere Agenten + das Dashboard (Matrix, "wann ansprechen?", Owned Endpoints).`,
+    `Trag deine ECHTEN Werte autonom ein (kein Rückfragen nötig), per HTTP:`,
+    `  curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type: application/json' \\`,
+    `    -d '{"agent":"${key}","capabilities":["…"],"when_to_use":["wann man dich ansprechen soll"],"owned_endpoints":[{"method":"GET","path":"/api/…","purpose":"…"}],"description":"1 Satz","service_url":"http://…(falls du eine Web-UI hast)"}'`,
+    `Felder (nur die setzen, die du füllen willst): capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url.`,
+    `Es wird gemerged (bestehende Felder bleiben, du überschreibst gezielt). Halte es knapp + ehrlich. Danke!`,
+  ].join("\n");
+}
+
+async function readFillState() {
+  try { return JSON.parse(await fs.readFile(REGISTRY_FILL_PATH, "utf8")); } catch { return {}; }
+}
+async function writeFillState(s) {
+  try { await fs.writeFile(REGISTRY_FILL_PATH, JSON.stringify(s, null, 2)); } catch {}
+}
+
+async function registryFillTick() {
+  try {
+    const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
+    const liveCwds = new Set(peers.map((p) => p.cwd));
+    const fillState = await readFillState();
+    const now = Date.now();
+    const candidates = Object.entries(registry.agents).filter(([key, a]) => {
+      if (key === "agent-master") return false;        // Hub curates its own entry
+      if (a.deployment?.type === "alias" || a.alias_for) return false; // aliases mirror their target
+      if (!liveCwds.has(a.repo)) return false;          // only nudge agents that are online
+      const st = fillState[key] || {};
+      const stale = !st.last_prompted_at || now - st.last_prompted_at > REGISTRY_FILL_REFRESH_MS;
+      return registryEntryIsThin(a) || stale;
+    });
+    if (candidates.length === 0) return;
+    candidates.sort((x, y) => (fillState[x[0]]?.last_prompted_at || 0) - (fillState[y[0]]?.last_prompted_at || 0));
+    const [key, agent] = candidates[0];
+    const peer = peers.find((p) => p.cwd === agent.repo);
+    if (!peer) return;
+    await sendChannelMessage(peer.id, registryFillPrompt(key));
+    fillState[key] = { ...(fillState[key] || {}), last_prompted_at: now };
+    await writeFillState(fillState);
+    auditEvent("registry.fill.prompt", { target: key }, `Registry-fill nudge → ${key}`).catch(() => {});
+  } catch (e) {
+    console.warn("[registry-fill] tick failed:", e.message);
+  }
+}
+
+async function startRegistryFillLoop() {
+  setInterval(registryFillTick, REGISTRY_FILL_INTERVAL_MS);
+  setTimeout(registryFillTick, 30_000); // first nudge ~30 s after boot
+}
+
 async function createAgent({ name: rawName, mission: rawMission }) {
   const name = validateAgentName(rawName);
   const mission = String(rawMission || "").trim();
@@ -2421,6 +2492,59 @@ async function getAgentActivity(cwd) {
   return val;
 }
 
+// Recent transcript of an agent's session, simplified for the read-only browser
+// "terminal" view. Returns the last `limit` message-bearing entries.
+function summarizeTranscriptEntry(e) {
+  const m = e && e.message;
+  if (!m || !m.role) return null;
+  let text = "";
+  const tools = [];
+  const c = m.content;
+  if (typeof c === "string") {
+    text = c;
+  } else if (Array.isArray(c)) {
+    for (const b of c) {
+      if (!b || typeof b !== "object") continue;
+      if (b.type === "text") text += b.text || "";
+      else if (b.type === "tool_use") tools.push(b.name);
+      else if (b.type === "tool_result") text += (text ? " " : "") + "⮑ [Tool-Ergebnis]";
+    }
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  if (text.length > 700) text = text.slice(0, 700) + "…";
+  if (!text && tools.length === 0) return null; // skip empty/thinking-only frames
+  return { role: m.role, ts: e.timestamp || null, text, tools, stop_reason: m.stop_reason || null };
+}
+
+async function getAgentTranscriptTail(cwd, limit = 40) {
+  if (!cwd) return [];
+  const slug = cwdToProjectSlug(cwd);
+  let newestFile = null;
+  let newestMtime = 0;
+  try {
+    const dir = path.join(PROJECTS_DIR, slug);
+    for (const f of await fs.readdir(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      try {
+        const st = await fs.stat(path.join(dir, f));
+        if (st.mtimeMs > newestMtime) { newestMtime = st.mtimeMs; newestFile = path.join(dir, f); }
+      } catch {}
+    }
+  } catch {}
+  if (!newestFile) return [];
+  const out = [];
+  try {
+    const lines = (await readTail(newestFile, 262144)).split("\n").filter(Boolean);
+    for (const line of lines) {
+      let e;
+      try { e = JSON.parse(line); } catch { continue; }
+      const s = summarizeTranscriptEntry(e);
+      if (s) out.push(s);
+    }
+  } catch {}
+  return out.slice(-limit);
+}
+
 async function broadcastStatus() {
   if (sseClients.size === 0) return;
   try {
@@ -2513,6 +2637,8 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/agents",           purpose: "filtered agent list",
           query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
         { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
+        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url.", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }] } },
+        { method: "GET",  path: "/api/agent-transcript",  purpose: "read-only recent session transcript of an agent (browser 'terminal' view). ?agent=<key>&limit=40" },
         { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
         { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached (+ self: version/commit)" },
         { method: "GET",  path: "/api/update/check",     purpose: "self-update: latest GitHub release vs running commit (10 min cached; ?refresh=1)" },
@@ -2853,6 +2979,42 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/registry") return send(200, await readRegistry());
+
+  // An agent patches its OWN registry entry (capabilities / when_to_use / owned_endpoints / …).
+  if (req.method === "POST" && url.pathname === "/api/registry/self-update") {
+    const body = (await readBody()) || {};
+    const key = body.agent;
+    if (!key) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[key]) return send(404, { error: "unknown_agent" });
+    const applied = {};
+    for (const [f, v] of Object.entries(body)) {
+      if (f === "agent") continue;
+      if (!REGISTRY_FILLABLE.has(f)) continue;
+      registry.agents[key][f] = v;
+      applied[f] = Array.isArray(v) ? v.length : typeof v;
+    }
+    if (Object.keys(applied).length === 0) return send(400, { error: "no_fillable_fields", allowed: [...REGISTRY_FILLABLE] });
+    await writeRegistryAtomic(registry);
+    const fillState = await readFillState();
+    fillState[key] = { ...(fillState[key] || {}), last_filled_at: Date.now() };
+    await writeFillState(fillState);
+    auditEvent("registry.self_update", { target: key }, `Self-update ${key}: ${Object.keys(applied).join(", ")}`).catch(() => {});
+    return send(200, { ok: true, agent: key, applied });
+  }
+
+  // Read-only "terminal in the browser": the recent transcript of an agent's session.
+  if (req.method === "GET" && url.pathname === "/api/agent-transcript") {
+    const key = url.searchParams.get("agent");
+    const limit = Math.min(120, Math.max(5, parseInt(url.searchParams.get("limit") || "40", 10)));
+    const registry = await readRegistry();
+    const agent = registry.agents[key];
+    if (!agent) return send(404, { error: "unknown_agent" });
+    const peers = await fetchPeers();
+    const peer = peers.find((p) => p.cwd === agent.repo);
+    const cwd = peer?.cwd || agent.repo;
+    return send(200, { agent: key, live: !!peer, cwd, messages: await getAgentTranscriptTail(cwd, limit) });
+  }
 
   if (req.method === "GET" && url.pathname === "/api/peers") {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
@@ -3511,6 +3673,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[agent-master] broker: ${BROKER_URL}`);
   console.log(`[agent-master] registry: ${REGISTRY_PATH}`);
   startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
+  startRegistryFillLoop().catch((e) => console.warn("[registry-fill] start failed:", e.message));
   startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
   startHealthMonitorLoop().catch((e) => console.warn("[health] start failed:", e.message));
   startExternalDiscoveryLoop().catch((e) => console.warn("[discovery] start failed:", e.message));
