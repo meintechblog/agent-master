@@ -347,6 +347,23 @@
   .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.offline { background: #444; }
   .tab-name { flex: 1; }
+  .tab-idle {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    margin-left: 4px;
+    white-space: nowrap;
+  }
+  .tab-idle.idle-long { color: var(--yellow); }
+  .tab-focus {
+    margin-left: 6px;
+    cursor: pointer;
+    opacity: 0.5;
+    font-size: 12px;
+    padding: 0 3px;
+    border-radius: 4px;
+  }
+  .tab-focus:hover { opacity: 1; background: rgba(255,255,255,0.08); color: var(--accent); }
   .tab-role {
     font-size: 10px;
     color: var(--text-dim);
@@ -1912,10 +1929,16 @@ function renderTabs() {
         })
         .join("");
     }
+    const idleMs = agent.live && agent.last_activity_at ? Date.now() - agent.last_activity_at : null;
+    const idleHtml = idleMs != null
+      ? `<span class="tab-idle ${idleMs > 5 * 60 * 1000 ? "idle-long" : ""}" title="seit letzter Terminal-Aktivität (idle / wartet)">⏱ ${formatIdle(idleMs)}</span>`
+      : "";
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
+      ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
+      ${agent.live ? `<span class="tab-focus" title="Zur Terminal-Session springen" onclick="event.stopPropagation();handleFocus('${key}')">↗</span>` : ""}
     `;
     btn.onclick = () => { active = key; render(); };
     tabs.appendChild(btn);
@@ -2060,6 +2083,7 @@ function renderContent() {
       <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Sofort hart stoppen</button>`;
   } else if (a.live) {
     actionBtns = `
+      <button class="btn btn-secondary" onclick="handleFocus('${active}')" title="Zur Terminal-Session dieses Agents springen">↗ Terminal</button>
       <button class="btn btn-warning" onclick="handleSoftStop('${active}')" title="Save & Push, dann hart-stop nach 5 Min">💤 Soft-Stop</button>
       <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Hart-Stop</button>`;
   } else {
@@ -2386,6 +2410,32 @@ async function handleSpawn(key) {
 async function handleStop(key) {
   if (!confirm(`Agent ${key} HART stoppen + Tab schließen?\n\n(Soft-Stop: "💤 Soft-Stop"-Button — gibt 5 Min zum Speichern.)`)) return;
   await postJson("/api/stop", { agent: key }, `⏹ Stoppe ${key}…`);
+}
+
+function formatIdle(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const mr = m % 60;
+  return `${h}h${mr ? " " + mr + "m" : ""}`;
+}
+
+// Bring the agent's Terminal window to the front (the "↗ Terminal" affordance).
+async function handleFocus(key) {
+  try {
+    const res = await (await fetch("/api/focus", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent: key }),
+    })).json();
+    if (!res.ok) {
+      if (res.not_running) alert(`${key} läuft gerade nicht.`);
+      else alert(`Terminal-Fenster für ${key} nicht gefunden (evtl. manuell geschlossen). Ein erneuter Spawn stellt die Verknüpfung wieder her.`);
+    }
+    // success: Terminal.app is now frontmost — nothing else to do.
+  } catch (e) {
+    console.warn("focus error:", e.message);
+  }
 }
 
 async function handleSoftStop(key) {

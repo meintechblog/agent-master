@@ -1530,10 +1530,13 @@ async function spawnAgent(repoKey, registry) {
     tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
     delay 1
     tell application "Terminal"
-      do script "cd ${cwd} && claudepeers" in selected tab of front window
+      do script "cd ${cwd} && CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers" in selected tab of front window
       -- Fixed tab title = agent key, so Jörg sees which agent lives in which tab
-      -- at a glance. Terminal.app's custom title overrides the cwd/process title
-      -- the shell + claude would otherwise set.
+      -- at a glance. CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 stops Claude Code from
+      -- continuously rewriting the tab title with its task status (Terminal.app is
+      -- last-writer-wins, so without it claude clobbers our repoKey within seconds).
+      -- Scoped to the spawned session only — Joerg's own claude sessions keep their
+      -- activity titles.
       set custom title of selected tab of front window to "${repoKey}"
       return id of front window
     end tell
@@ -1786,6 +1789,72 @@ async function stopAgent(repoKey, registry) {
     persistSpawnedWindows();
   }
   return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty: ttyRaw, ttyFull, findRaw, targetWid, targetTab, closeErr } };
+}
+
+// Bring the agent's Terminal window to the front (the "↗ Terminal" button in the
+// dashboard). Each spawned agent gets its own window, so the spawn-captured
+// window id uniquely identifies the tab. Fallback: tty-match for sessions a user
+// started manually (not via /api/spawn).
+async function focusAgent(repoKey, registry) {
+  const agent = registry.agents[repoKey];
+  if (!agent) throw new Error(`unknown agent: ${repoKey}`);
+  const peers = await fetchPeers();
+  const peer = peers.find((p) => p.cwd === agent.repo);
+  if (!peer) return { not_running: true, agent: repoKey };
+
+  const focusByWid = (wid) =>
+    runOsa(`
+      tell application "Terminal"
+        set index of window id ${wid} to 1
+        set frontmost of window id ${wid} to true
+        activate
+      end tell
+    `);
+
+  // Primary: the window id captured at spawn time.
+  let targetWid = spawnedWindows.get(repoKey) || null;
+  if (targetWid) {
+    try {
+      await focusByWid(targetWid);
+      return { ok: true, agent: repoKey, window_id: targetWid, via: "spawn-map" };
+    } catch {
+      targetWid = null; // window closed/reopened — fall through to tty-match.
+    }
+  }
+
+  // Fallback: locate the window by the peer's tty.
+  const ttyRaw = peer.tty || "";
+  const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
+  if (ttyFull) {
+    let findRaw = "";
+    try {
+      findRaw = await runOsa(`
+        tell application "Terminal"
+          set found to ""
+          repeat with w in windows
+            repeat with t in tabs of w
+              try
+                if tty of t is "${ttyFull}" then
+                  set found to (id of w as text)
+                  exit repeat
+                end if
+              end try
+            end repeat
+            if found is not "" then exit repeat
+          end repeat
+          return found
+        end tell
+      `);
+    } catch {}
+    if (/^\d+$/.test(findRaw)) {
+      const wid = parseInt(findRaw, 10);
+      await focusByWid(wid);
+      spawnedWindows.set(repoKey, wid);
+      persistSpawnedWindows();
+      return { ok: true, agent: repoKey, window_id: wid, via: "tty-match" };
+    }
+  }
+  return { ok: false, agent: repoKey, reason: "window_not_found" };
 }
 
 // ── Plan-Usage (Claude Code Subscription /usage data) ───────────────────────
@@ -2179,6 +2248,41 @@ function resolveLive(agent, registry, liveByCwd) {
   return null;
 }
 
+// === Idle / last-activity per agent ===
+// A live Claude Code session appends to its transcript jsonl on every turn/tool
+// step. The newest mtime in the session's ~/.claude/projects/<slug>/ dir is thus
+// the last time the agent did anything — when it's waiting for input or sitting
+// on an open question, the mtime freezes and idle time grows. Good enough proxy
+// for "how long has this agent been idle in its tab" (caveat: a single very long
+// tool call also looks idle until it appends). Cached 5 s so SSE ticks stay cheap.
+const PROJECTS_DIR = path.join(process.env.HOME || "", ".claude", "projects");
+const IDLE_CACHE_MS = 5000;
+const idleCache = new Map(); // slug -> { ts, at }
+function cwdToProjectSlug(cwd) {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+async function lastActivityForCwd(cwd) {
+  if (!cwd) return null;
+  const slug = cwdToProjectSlug(cwd);
+  const now = Date.now();
+  const cached = idleCache.get(slug);
+  if (cached && now - cached.at < IDLE_CACHE_MS) return cached.ts;
+  let newest = 0;
+  try {
+    const dir = path.join(PROJECTS_DIR, slug);
+    for (const f of await fs.readdir(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      try {
+        const st = await fs.stat(path.join(dir, f));
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      } catch {}
+    }
+  } catch {}
+  const ts = newest || null;
+  idleCache.set(slug, { ts, at: now });
+  return ts;
+}
+
 async function broadcastStatus() {
   if (sseClients.size === 0) return;
   try {
@@ -2196,6 +2300,7 @@ async function broadcastStatus() {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
+        last_activity_at: live ? await lastActivityForCwd(live.cwd) : null,
       };
     }
     const payload = {
@@ -2285,6 +2390,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/llm/cache",        purpose: "in-memory response-cache stats (hits/misses/size). ?clear=1 wipes the cache. Cache is keyed on SHA256(model+system+prompt+json_schema+max_tokens), default TTL 5min, override per-call via cache_ttl_ms or disable via cache:false" },
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
+        { method: "POST", path: "/api/focus",            purpose: "bring a live agent's Terminal window to the front (macOS)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/peer/notify",      purpose: "reuse-or-spawn escalation: deliver a context message to a peer session (channel-message if alive, else spawn first then deliver). For external scripts that can only reach the hub over HTTP.", body: { repo: "<key>", context: "<message>", reuse_if_alive: true, spawn_if_offline: true, source: "<caller-id>?" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab). requested_by:'agent' marks an agent self-stop (always honored + logged).", body: { agent: "<key>", requested_by: "operator|agent", reason: "<text>?" } },
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
@@ -2632,6 +2738,7 @@ async function handleApi(req, res, url) {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
+        last_activity_at: live ? await lastActivityForCwd(live.cwd) : null,
       };
     }
     return send(200, {
@@ -3131,6 +3238,20 @@ async function handleApi(req, res, url) {
     } catch (e) {
       auditEvent("spawn.fail", { target: parsed.agent }, `Spawn FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
       return send(500, { error: "spawn_failed", reason: String(e.message) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/focus") {
+    const parsed = await readJson();
+    if (!parsed) return send(400, { error: "invalid_json" });
+    if (!parsed.agent) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[parsed.agent]) return send(404, { error: "unknown_agent" });
+    try {
+      const result = await focusAgent(parsed.agent, registry);
+      return send(result.ok ? 200 : result.not_running ? 409 : 404, result);
+    } catch (e) {
+      return send(500, { error: "focus_failed", reason: String(e.message) });
     }
   }
 
