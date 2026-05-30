@@ -364,6 +364,31 @@
     border-radius: 4px;
   }
   .tab-focus:hover { opacity: 1; background: rgba(255,255,255,0.08); color: var(--accent); }
+  .tab-focus.waiting { opacity: 1; color: var(--yellow); animation: waitpulse 1.6s ease-in-out infinite; }
+  .tab.waiting { box-shadow: inset 3px 0 0 var(--yellow); }
+  @keyframes waitpulse { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
+  /* Agent matrix */
+  .matrix-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .matrix-table th, .matrix-table td {
+    padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border, #222);
+    white-space: nowrap;
+  }
+  .matrix-table th {
+    position: sticky; top: 0; background: var(--bg, #0a0a0a); color: var(--text-dim);
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    z-index: 1;
+  }
+  .matrix-table tr:hover td { background: rgba(255,255,255,0.03); }
+  .matrix-table .agent-link { color: var(--text); font-weight: 600; text-decoration: none; cursor: pointer; }
+  .matrix-table .agent-link:hover { color: var(--accent); text-decoration: underline; }
+  .matrix-table .mx-yes { color: var(--green); font-weight: 700; }
+  .matrix-table .mx-no { color: var(--text-dim); }
+  .matrix-table a.mx-ext { color: var(--accent); text-decoration: none; }
+  .matrix-table a.mx-ext:hover { text-decoration: underline; }
+  .matrix-table .mx-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align: middle; }
+  .matrix-table .mx-dot.live { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .matrix-table .mx-dot.offline { background:#444; }
+  .matrix-table .health-led { display:inline-block; width:9px;height:9px;border-radius:50%; }
   .tab-role {
     font-size: 10px;
     color: var(--text-dim);
@@ -1397,6 +1422,7 @@
   <a id="update-badge" href="#" title="Hub-Update verfügbar" style="display:none;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;background:#1f3a1f;border:1px solid #2e6b2e;color:#7fdc7f;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap"></a>
   <div class="view-toggle">
     <button class="view-btn active" id="view-agents"   onclick="switchView('agents')">🛰 Agenten</button>
+    <button class="view-btn"        id="view-matrix"   onclick="switchView('matrix')">🔲 Matrix</button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
     <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
@@ -1527,6 +1553,19 @@
   </div>
   <div id="session-kpis" class="usage-kpis"></div>
   <div id="session-matrix-wrap"><div class="empty-tip">Lade Session-Matrix…</div></div>
+</section>
+
+<section id="matrix-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">Agenten · Eigenschaften-Matrix</h2>
+      <div class="section-hint">Alle Agenten + Eigenschaften auf einen Blick. Klick auf einen Namen öffnet die Unterseite (<code>/&lt;agent&gt;</code>).</div>
+    </div>
+    <div class="usage-controls">
+      <button class="btn btn-secondary" onclick="loadMatrix(true)">⟳</button>
+    </div>
+  </div>
+  <div id="matrix-wrap"><div class="empty-tip">Lade Matrix…</div></div>
 </section>
 
 <!-- Skill detail modal -->
@@ -1903,7 +1942,7 @@ function renderTabs() {
   tabs.innerHTML = "";
   for (const [key, agent] of entries) {
     const btn = document.createElement("button");
-    btn.className = "tab" + (active === key ? " active" : "");
+    btn.className = "tab" + (active === key ? " active" : "") + (agent.waiting ? " waiting" : "");
     const usage = llmLive.by_caller?.[key];
     const now = llmLive.now || Date.now();
     let dotsHtml = "";
@@ -1938,9 +1977,9 @@ function renderTabs() {
       <span class="tab-name">${key}</span>
       ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
-      ${agent.live ? `<span class="tab-focus" title="Zur Terminal-Session springen" onclick="event.stopPropagation();handleFocus('${key}')">↗</span>` : ""}
+      ${agent.live ? `<span class="tab-focus${agent.waiting ? " waiting" : ""}" title="${agent.waiting ? "wartet auf deine Eingabe — zur Session springen" : "Zur Terminal-Session springen"}" onclick="event.stopPropagation();handleFocus('${key}')">${agent.waiting ? "⏳" : "↗"}</span>` : ""}
     `;
-    btn.onclick = () => { active = key; render(); };
+    btn.onclick = () => selectAgent(key);
     tabs.appendChild(btn);
   }
   const addBtn = document.createElement("button");
@@ -2474,6 +2513,7 @@ function render() {
   renderTabs();
   renderContent();
   renderUsage();
+  if (view === "matrix") renderMatrix();
   document.getElementById("online-count").textContent = state.online_count;
   document.getElementById("total-count").textContent = state.total_count;
   document.getElementById("last-update").textContent = fmtTime();
@@ -2495,19 +2535,93 @@ async function refreshHealthInBackground() {
   } catch {}
 }
 
-function switchView(v) {
+function switchView(v, push = true) {
   view = v;
-  for (const k of ["agents", "skills", "usage", "settings"]) {
+  for (const k of ["agents", "matrix", "skills", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
   document.getElementById("agents-layout").style.display   = v === "agents"   ? "" : "none";
+  document.getElementById("matrix-view").style.display     = v === "matrix"   ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
   if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
+  if (v === "matrix") loadMatrix(false);
+  if (push) {
+    const target = v === "agents" ? (active ? "/" + active : "/") : "/" + v;
+    if (location.pathname !== target) history.pushState({ view: v, active }, "", target);
+  }
+}
+
+// Select an agent + deep-link to /<key>.
+function selectAgent(key) {
+  active = key;
+  switchView("agents", false);
+  if (location.pathname !== "/" + key) history.pushState({ active: key }, "", "/" + key);
+  render();
+}
+
+// Apply the current URL → view/agent (on load + back/forward).
+function applyRoute() {
+  const seg = decodeURIComponent((location.pathname || "/").replace(/^\/+|\/+$/g, ""));
+  if (["matrix", "skills", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
+  if (seg && state && state.agents && state.agents[seg]) { active = seg; switchView("agents", false); render(); return; }
+  switchView("agents", false);
+}
+window.addEventListener("popstate", applyRoute);
+
+let matrixUpdaters = null;
+async function loadMatrix(force) {
+  try {
+    const u = await (await fetch("/api/agent-updaters" + (force ? "?refresh=1" : ""))).json();
+    matrixUpdaters = u.updaters || {};
+  } catch { matrixUpdaters = matrixUpdaters || {}; }
+  renderMatrix();
+}
+
+function renderMatrix() {
+  const wrap = document.getElementById("matrix-wrap");
+  if (!wrap) return;
+  if (!state || !state.agents) { wrap.innerHTML = `<div class="empty-tip">Lade…</div>`; return; }
+  const ups = matrixUpdaters || {};
+  const hc = (healthData && healthData.checks) || {};
+  const rows = Object.entries(state.agents)
+    .sort((a, b) => (b[1].live ? 1 : 0) - (a[1].live ? 1 : 0) || a[0].localeCompare(b[0]))
+    .map(([key, a]) => {
+      const webUrl = a.service_url || (a.live_dashboards && a.live_dashboards[0] && a.live_dashboards[0].url) || "";
+      const web = webUrl
+        ? `<a class="mx-ext" href="${webUrl}" target="_blank" rel="noopener">🌐 ${webUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a>`
+        : `<span class="mx-no">—</span>`;
+      const au = ups[key] && ups[key].has_auto_update ? `<span class="mx-yes">✓</span>` : `<span class="mx-no">—</span>`;
+      const idle = a.live && a.last_activity_at ? formatIdle(Date.now() - a.last_activity_at) : "—";
+      const h = hc[key];
+      const hcolor = h ? (h.status === "ok" ? "var(--green)" : h.status === "warn" ? "var(--yellow)" : h.status === "down" ? "var(--red)" : "#555") : "#555";
+      const htitle = h ? (h.status + (h.http_status ? " (" + h.http_status + ")" : (h.reason ? ": " + h.reason : ""))) : "n/a";
+      const caps = (a.capabilities && a.capabilities.length) || 0;
+      const role = a.role || (a.deployment && a.deployment.type) || "—";
+      const ghUrl = a.repo_url ? a.repo_url.replace(/\s*\(.*\)\s*$/, "").trim() : "";
+      const gh = ghUrl ? `<a class="mx-ext" href="${ghUrl}" target="_blank" rel="noopener">GitHub ↗</a>` : `<span class="mx-no">—</span>`;
+      const waitDot = a.waiting ? ` <span title="wartet auf deine Eingabe" style="color:var(--yellow)">⏳</span>` : "";
+      return `<tr>
+        <td><span class="mx-dot ${a.live ? "live" : "offline"}"></span><a class="agent-link" onclick="selectAgent('${key}')">${key}</a>${waitDot}</td>
+        <td>${a.live ? "live" : '<span class="mx-no">offline</span>'}</td>
+        <td>${idle}</td>
+        <td>${web}</td>
+        <td style="text-align:center">${au}</td>
+        <td><span class="health-led" style="background:${hcolor}" title="${htitle}"></span></td>
+        <td>${role}</td>
+        <td style="text-align:center">${caps || '<span class="mx-no">0</span>'}</td>
+        <td>${gh}</td>
+      </tr>`;
+    })
+    .join("");
+  wrap.innerHTML = `<table class="matrix-table">
+    <thead><tr>
+      <th>Agent</th><th>Status</th><th>Idle</th><th>Web-App</th><th>Auto-Update</th><th>Health</th><th>Rolle</th><th>Caps</th><th>GitHub</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 async function loadSkills(force) {
@@ -3219,6 +3333,7 @@ async function init() {
   } catch {}
   await refreshHealthInBackground();
   render();
+  applyRoute();   // honor deep-link (/matrix, /<agent>) from the URL
   connectSse();   // SSE delivers llm_live too, no polling needed
   // refresh health every 5 min (it's cached server-side; client fetch triggers a soft refresh)
   setInterval(refreshHealthInBackground, 5 * 60 * 1000);

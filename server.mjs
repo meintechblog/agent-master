@@ -1822,7 +1822,40 @@ async function focusAgent(repoKey, registry) {
     }
   }
 
-  // Fallback: locate the window by the peer's tty.
+  // Fallback A: match by the tab's custom title (= repoKey, set at spawn). Robust
+  // when the spawn-captured window id went stale (e.g. window reopened after a
+  // reboot) — and self-heals the spawnedWindows map.
+  {
+    let findRaw = "";
+    try {
+      findRaw = await runOsa(`
+        tell application "Terminal"
+          set found to ""
+          repeat with w in windows
+            repeat with t in tabs of w
+              try
+                if (custom title of t) is "${repoKey}" then
+                  set found to (id of w as text)
+                  exit repeat
+                end if
+              end try
+            end repeat
+            if found is not "" then exit repeat
+          end repeat
+          return found
+        end tell
+      `);
+    } catch {}
+    if (/^\d+$/.test(findRaw)) {
+      const wid = parseInt(findRaw, 10);
+      await focusByWid(wid);
+      spawnedWindows.set(repoKey, wid);
+      persistSpawnedWindows();
+      return { ok: true, agent: repoKey, window_id: wid, via: "title-match" };
+    }
+  }
+
+  // Fallback B: locate the window by the peer's tty.
   const ttyRaw = peer.tty || "";
   const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
   if (ttyFull) {
@@ -2228,6 +2261,67 @@ async function fetchHealth(registry, force = false) {
   return { ...data, cached: false, age_ms: 0 };
 }
 
+// === Auto-update integration probe (for the agent matrix) ===
+// "Has this agent integrated the self-updater into its web app?" We detect it by
+// probing the agent's web service for /api/update/check (the uniform endpoint the
+// updater exposes). A registry field `auto_update: true` short-circuits the probe.
+// Cached 5 min — these are cross-LAN HTTP calls.
+const UPDATER_CACHE_MS = 5 * 60 * 1000;
+let updaterCache = { data: null, at: 0 };
+function agentWebBase(agent) {
+  const raw =
+    agent.service_url ||
+    (Array.isArray(agent.live_dashboards) && agent.live_dashboards[0]?.url) ||
+    agent.health_check?.url ||
+    null;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
+}
+async function probeAutoUpdate(registry, force = false) {
+  const now = Date.now();
+  if (!force && updaterCache.data && now - updaterCache.at < UPDATER_CACHE_MS) return updaterCache.data;
+  const out = {};
+  await Promise.all(
+    Object.entries(registry.agents).map(async ([key, agent]) => {
+      if (agent.auto_update === true) {
+        out[key] = { has_auto_update: true, via: "registry" };
+        return;
+      }
+      const base = agentWebBase(agent);
+      if (!base) {
+        out[key] = { has_auto_update: false, via: "no-url" };
+        return;
+      }
+      try {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 2500);
+        const r = await fetch(`${base}/api/update/check`, { signal: ctrl.signal });
+        clearTimeout(to);
+        // Require the body to actually look like an update-check response — a bare
+        // 200 from a catch-all route (or the Hub via an alias) would otherwise
+        // false-positive.
+        let confirmed = false;
+        if (r.ok) {
+          try {
+            const j = await r.json();
+            confirmed = !!j && (typeof j.update_available !== "undefined" || (j.current && typeof j.current === "object"));
+          } catch {}
+        }
+        out[key] = { has_auto_update: confirmed, via: "probe", http: r.status, base };
+      } catch {
+        out[key] = { has_auto_update: false, via: "probe-fail", base };
+      }
+    })
+  );
+  updaterCache = { data: out, at: now };
+  return out;
+}
+
 function sseSend(res, event, data) {
   try {
     res.write(`event: ${event}\n`);
@@ -2261,26 +2355,70 @@ const idleCache = new Map(); // slug -> { ts, at }
 function cwdToProjectSlug(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
-async function lastActivityForCwd(cwd) {
-  if (!cwd) return null;
+// Read the last `bytes` of a file (transcripts can be MBs; we only need the tail).
+async function readTail(file, bytes = 65536) {
+  const fh = await fs.open(file, "r");
+  try {
+    const { size } = await fh.stat();
+    const start = Math.max(0, size - bytes);
+    const len = size - start;
+    if (len <= 0) return "";
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, start);
+    return buf.toString("utf8");
+  } finally {
+    await fh.close();
+  }
+}
+
+// Per-agent activity: newest transcript mtime (= last_activity_at) plus a "waiting
+// for the operator" flag. Waiting = the last message-bearing transcript entry is an
+// assistant turn that ENDED (stop_reason end_turn) or a pending AskUserQuestion /
+// ExitPlanMode — i.e. Claude finished and is sitting on the operator. A long single
+// tool call (stop_reason tool_use, or a trailing tool_result) reads as NOT waiting,
+// which is what lets us tell "done, your turn" apart from "still grinding".
+async function getAgentActivity(cwd) {
+  const empty = { last_activity_at: null, waiting: false };
+  if (!cwd) return empty;
   const slug = cwdToProjectSlug(cwd);
   const now = Date.now();
   const cached = idleCache.get(slug);
-  if (cached && now - cached.at < IDLE_CACHE_MS) return cached.ts;
-  let newest = 0;
+  if (cached && now - cached.at < IDLE_CACHE_MS) return cached.val;
+  let newestMtime = 0;
+  let newestFile = null;
   try {
     const dir = path.join(PROJECTS_DIR, slug);
     for (const f of await fs.readdir(dir)) {
       if (!f.endsWith(".jsonl")) continue;
       try {
         const st = await fs.stat(path.join(dir, f));
-        if (st.mtimeMs > newest) newest = st.mtimeMs;
+        if (st.mtimeMs > newestMtime) { newestMtime = st.mtimeMs; newestFile = path.join(dir, f); }
       } catch {}
     }
   } catch {}
-  const ts = newest || null;
-  idleCache.set(slug, { ts, at: now });
-  return ts;
+  let waiting = false;
+  if (newestFile) {
+    try {
+      const lines = (await readTail(newestFile)).split("\n").filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let e;
+        try { e = JSON.parse(lines[i]); } catch { continue; } // skip partial first line / non-JSON
+        const msg = e.message;
+        if (!msg || !msg.role) continue; // skip attachment / system / summary entries
+        if (msg.role === "assistant") {
+          if (msg.stop_reason === "end_turn") waiting = true;
+          else if (msg.stop_reason === "tool_use" && Array.isArray(msg.content)) {
+            const names = msg.content.filter((b) => b && b.type === "tool_use").map((b) => b.name);
+            if (names.includes("AskUserQuestion") || names.includes("ExitPlanMode")) waiting = true;
+          }
+        }
+        break; // the last message-bearing entry decides
+      }
+    } catch {}
+  }
+  const val = { last_activity_at: newestMtime || null, waiting };
+  idleCache.set(slug, { val, at: now });
+  return val;
 }
 
 async function broadcastStatus() {
@@ -2300,7 +2438,8 @@ async function broadcastStatus() {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
-        last_activity_at: live ? await lastActivityForCwd(live.cwd) : null,
+        last_activity_at: live ? (await getAgentActivity(live.cwd)).last_activity_at : null,
+        waiting: live ? (await getAgentActivity(live.cwd)).waiting : false,
       };
     }
     const payload = {
@@ -2379,6 +2518,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/update/check",     purpose: "self-update: latest GitHub release vs running commit (10 min cached; ?refresh=1)" },
         { method: "GET",  path: "/api/update/status",    purpose: "self-update: progress of an in-flight apply (poll)" },
         { method: "POST", path: "/api/update/apply",     purpose: "self-update: apply a release in-place + restart. body: { tag? } — defaults to latest. Manual-only." },
+        { method: "GET",  path: "/api/agent-updaters",   purpose: "per-agent 'has the self-updater integrated' map (probes <web>/api/update/check; 5 min cached). Powers the Matrix tab." },
         { method: "GET",  path: "/api/usage",            purpose: "ccusage cost overlay (5 min cached)" },
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
@@ -2738,7 +2878,8 @@ async function handleApi(req, res, url) {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
-        last_activity_at: live ? await lastActivityForCwd(live.cwd) : null,
+        last_activity_at: live ? (await getAgentActivity(live.cwd)).last_activity_at : null,
+        waiting: live ? (await getAgentActivity(live.cwd)).waiting : false,
       };
     }
     return send(200, {
@@ -2749,6 +2890,11 @@ async function handleApi(req, res, url) {
       soft_stops: Object.fromEntries(softStopState),
       updated_at: new Date().toISOString(),
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/agent-updaters") {
+    const registry = await readRegistry();
+    return send(200, { updaters: await probeAutoUpdate(registry, url.searchParams.get("refresh") === "1"), generated_at: new Date().toISOString() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/usage") {
@@ -3332,9 +3478,17 @@ async function handleApi(req, res, url) {
 
 async function serveStatic(req, res, url) {
   const requested = url.pathname === "/" ? "/index.html" : url.pathname;
-  const filePath = path.join(PUBLIC_DIR, requested);
+  let filePath = path.join(PUBLIC_DIR, requested);
   if (!filePath.startsWith(PUBLIC_DIR)) return res.writeHead(403).end("forbidden");
-  if (!existsSync(filePath)) return res.writeHead(404).end("not found");
+  if (!existsSync(filePath)) {
+    // SPA deep-link fallback: an extension-less route (e.g. /agent-master, /matrix)
+    // that isn't a real file → serve index.html so the client router can handle it.
+    if (!path.extname(requested)) {
+      filePath = path.join(PUBLIC_DIR, "index.html");
+    } else {
+      return res.writeHead(404).end("not found");
+    }
+  }
   const ext = path.extname(filePath).toLowerCase();
   const data = await fs.readFile(filePath);
   res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": "no-cache" });
