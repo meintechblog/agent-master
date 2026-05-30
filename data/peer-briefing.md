@@ -36,6 +36,13 @@ curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type:
 ```
 Felder (nur die setzen, die du füllen willst, wird gemerged): `capabilities`, `when_to_use`, `owned_endpoints`, `mqtt_topics`, `depends_on`, `tags`, `description`, `display_name`, `service_url`, `live_dashboards`, `repo_url`. Der Hub stupst dich ggf. alle paar Wochen an, das frisch zu halten — du kannst es aber jederzeit selbst tun.
 
+**♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Wenn dein Context-Monitor-Hook **CRITICAL (≥75%)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
+```bash
+curl -s -X POST http://localhost:7890/api/recycle -H 'Content-Type: application/json' \
+  -d '{"agent":"<dein-key>","requested_by":"agent","reason":"context full"}'
+```
+Der Hub schließt dann deinen Tab, öffnet eine frische Session und schickt ihr „weiter" — die liest deinen Handoff und macht nahtlos da weiter, wo du aufgehört hast. So bleibt die Qualität hoch ohne manuelles `/clear`. (Gilt für alle Agenten außer den Hub selbst.) Voraussetzung: ALLES muss vorher gepusht + im Memory sein, sonst geht Kontext verloren.
+
 **📵 WA-Pushes sind OPT-IN, nie default.** Wenn du `/api/wa-push` callst, gehst du davon aus, dass der Operator dich explizit darum gebeten hat ("ping mich wenn X"). Automatisches Pushen "weil's eine Statusänderung gab" → NEIN. Logging in InfluxDB + Activity-Feed reicht. Nur wenn der Operator ausdrücklich "alerts mich bei Y" gesagt hat → opt-in pro Quelle aktivieren.
 
 **🧠 LLM-Gateway (sonnet-master) — schone Opus durch Delegation.** Der Hub bietet `POST /api/llm/complete` damit du Trivial-Tasks an günstigere Modelle (Sonnet/Haiku) deferst statt sie mit Opus zu bearbeiten. Läuft über den Pro/Max-Plan-Token-Bucket (Sonnet hat eigenen Pool, frisst nicht dein Opus-Quota), KEIN extra API-Key.

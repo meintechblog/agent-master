@@ -1626,6 +1626,29 @@ async function spawnAgent(repoKey, registry) {
   return { repoKey, windowId: wid, cwd, registered: !!peer, peer_id: peer?.id || null };
 }
 
+// Context-window recycle: stop the agent (close tab) → respawn (fresh tab) → send
+// "weiter" so it resumes from its memory handoff. The agent triggers this itself
+// when its context monitor goes CRITICAL and it has written a handoff + pushed.
+// Covers every agent EXCEPT the Hub (which can't cleanly stop+respawn itself).
+async function recycleAgent(repoKey, registry) {
+  const agent = registry.agents[repoKey];
+  if (!agent) throw new Error(`unknown agent: ${repoKey}`);
+  const log = (m) => fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} recycle ${repoKey} ${m}\n`).catch(() => {});
+  await log("begin → stop");
+  await stopAgent(repoKey, registry).catch((e) => log(`stop err: ${e.message}`));
+  await new Promise((r) => setTimeout(r, 3000));         // let the tab close settle
+  await log("respawn");
+  const spawnRes = await spawnAgent(repoKey, registry);   // waits for broker registration
+  let weiterSent = false;
+  if (spawnRes.peer_id) {
+    await new Promise((r) => setTimeout(r, 5000));         // let the fresh session boot + load memory
+    await sendChannelMessage(spawnRes.peer_id, "weiter").catch((e) => log(`weiter err: ${e.message}`));
+    weiterSent = true;
+  }
+  await log(`done respawned=${!!spawnRes.peer_id} weiter=${weiterSent}`);
+  return { ok: true, agent: repoKey, respawned: !!spawnRes.peer_id, weiter_sent: weiterSent };
+}
+
 async function softStopAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
   if (!agent) throw new Error(`unknown agent: ${repoKey}`);
@@ -2657,6 +2680,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/llm/stats",        purpose: "per-caller / per-model usage rollups (last 24h + 7d) from InfluxDB llm_call measurement" },
         { method: "POST", path: "/api/spawn",            purpose: "spawn an agent",   body: { agent: "<key>" } },
         { method: "POST", path: "/api/focus",            purpose: "bring a live agent's Terminal window to the front (macOS)", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/recycle",          purpose: "context-window recycle: stop the agent → respawn → send 'weiter'. Agent triggers it when its context monitor is CRITICAL and it has written a handoff + pushed. Not the Hub.", body: { agent: "<key>", requested_by: "agent|operator", reason: "<text>?" } },
         { method: "POST", path: "/api/peer/notify",      purpose: "reuse-or-spawn escalation: deliver a context message to a peer session (channel-message if alive, else spawn first then deliver). For external scripts that can only reach the hub over HTTP.", body: { repo: "<key>", context: "<message>", reuse_if_alive: true, spawn_if_offline: true, source: "<caller-id>?" } },
         { method: "POST", path: "/api/stop",             purpose: "hard-stop an agent (SIGTERM + close tab). requested_by:'agent' marks an agent self-stop (always honored + logged).", body: { agent: "<key>", requested_by: "operator|agent", reason: "<text>?" } },
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
@@ -3561,6 +3585,22 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return send(500, { error: "focus_failed", reason: String(e.message) });
     }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/recycle") {
+    const parsed = (await readBody()) || {};
+    if (!parsed.agent) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[parsed.agent]) return send(404, { error: "unknown_agent" });
+    if (parsed.agent === "agent-master") return send(400, { error: "cannot_recycle_hub", reason: "the Hub can't cleanly stop+respawn itself" });
+    // Respond BEFORE recycling — the caller is usually the agent being recycled, so
+    // its curl must return before we SIGTERM its session. Recycle runs async.
+    send(202, { ok: true, recycling: parsed.agent });
+    auditEvent("recycle.start", { target: parsed.agent, requested_by: parsed.requested_by === "agent" ? "agent" : "operator" }, `Recycle start: ${parsed.agent}${parsed.reason ? ` — ${String(parsed.reason).slice(0, 200)}` : ""}`).catch(() => {});
+    recycleAgent(parsed.agent, registry)
+      .then((r) => auditEvent("recycle.done", { target: parsed.agent }, `Recycle done: ${parsed.agent} respawned=${r.respawned} weiter=${r.weiter_sent}`).catch(() => {}))
+      .catch((e) => auditEvent("recycle.fail", { target: parsed.agent }, `Recycle FAIL ${parsed.agent}: ${e.message.slice(0, 120)}`).catch(() => {}));
+    return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/stop") {
