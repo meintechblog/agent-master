@@ -1445,6 +1445,7 @@
   .session-msg { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px dashed rgba(255,255,255,0.06); }
   .session-msg.assistant .session-role { color: var(--accent, #6cf); }
   .session-msg.user .session-role { color: var(--text-dim, #999); }
+  .session-msg.pending { opacity: 0.7; }
   .session-role { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 4px; }
   .session-wait { color: var(--yellow); font-weight: 700; }
   .session-text { white-space: pre-wrap; word-break: break-word; color: var(--text, #ddd); }
@@ -2723,6 +2724,8 @@ function formatIdle(ms) {
 // reload restores the last conversation. Chat only renders while the agent is live.
 let chatPollTimer = null;
 let _chatRenderedFor = null;
+let _lastChatMessages = [];        // last transcript tail fetched for the active agent
+let pendingChat = {};              // agent -> [{text, at}] messages I sent but not yet seen in the transcript
 function isChatCollapsed() { return localStorage.getItem("chatCollapsed") === "1"; }
 function toggleChat() {
   localStorage.setItem("chatCollapsed", isChatCollapsed() ? "0" : "1");
@@ -2738,20 +2741,38 @@ function startChatPoll() {
   stopChatPoll();
   const a = state.agents && state.agents[active];
   if (!a || !a.live || isChatCollapsed() || !document.getElementById("chat-log")) return;
+  _lastChatMessages = [];
   refreshChatLog();
   chatPollTimer = setInterval(refreshChatLog, 4000);
+}
+// Render the chat-log from the last transcript tail PLUS any of my still-unconfirmed
+// sent messages (optimistic echo), so a send is always visible immediately — even
+// if the target agent is busy/hung and hasn't written it to its transcript yet.
+function paintChatLog() {
+  const el = document.getElementById("chat-log");
+  if (!el) return;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  const msgs = _lastChatMessages || [];
+  const now = Date.now();
+  // Drop pending echoes that timed out (90s) or now appear in the transcript.
+  let pend = (pendingChat[active] || []).filter((p) => now - p.at < 90000);
+  pend = pend.filter((p) => !msgs.some((m) => m.role === "user" && (m.text || "").includes(p.text)));
+  pendingChat[active] = pend;
+  let html = msgs.map(renderSessionMsg).join("");
+  html += pend.map((p) =>
+    `<div class="session-msg user pending"><div class="session-role">👤 du <span class="session-wait">⏳ gesendet…</span></div><div class="session-text">${escapeHtml(p.text)}</div></div>`
+  ).join("");
+  el.innerHTML = html || `<div class="empty-tip">Noch kein Verlauf.</div>`;
+  if (atBottom) el.scrollTop = el.scrollHeight;
 }
 async function refreshChatLog() {
   if (!document.getElementById("chat-log")) { stopChatPoll(); return; }
   const forAgent = active;
   try {
     const d = await (await fetch(`/api/agent-transcript?agent=${encodeURIComponent(forAgent)}&limit=60`)).json();
-    const el = document.getElementById("chat-log");
-    if (!el || active !== forAgent) return; // switched agents mid-fetch
-    if (!d.messages || !d.messages.length) { el.innerHTML = `<div class="empty-tip">Noch kein Verlauf.</div>`; return; }
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    el.innerHTML = d.messages.map(renderSessionMsg).join("");
-    if (atBottom) el.scrollTop = el.scrollHeight;
+    if (active !== forAgent) return; // switched agents mid-fetch
+    _lastChatMessages = d.messages || [];
+    paintChatLog();
   } catch {}
 }
 async function sendInlineChat() {
@@ -2762,14 +2783,27 @@ async function sendInlineChat() {
   const key = active;
   markAgentUsed(key);
   inp.value = ""; inp.disabled = true;
+  // Optimistic echo: show my message right away (with a ⏳ "gesendet" marker),
+  // so I get feedback even if the agent is busy/hung and slow to reflect it.
+  const entry = { text, at: Date.now() };
+  (pendingChat[key] = pendingChat[key] || []).push(entry);
+  paintChatLog();
   try {
     const res = await (await fetch("/api/agent-chat", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent: key, text }),
     })).json();
-    if (!res.ok) alert("Senden fehlgeschlagen: " + (res.error === "agent_offline" ? `${key} ist offline` : (res.error || "unbekannt")));
-  } catch (e) { alert("Fehler: " + e.message); }
+    if (!res.ok) {
+      pendingChat[key] = (pendingChat[key] || []).filter((p) => p !== entry); // un-echo on failure
+      paintChatLog();
+      alert("Senden fehlgeschlagen: " + (res.error === "agent_offline" ? `${key} ist offline` : (res.error || "unbekannt")));
+    }
+  } catch (e) {
+    pendingChat[key] = (pendingChat[key] || []).filter((p) => p !== entry);
+    paintChatLog();
+    alert("Fehler: " + e.message);
+  }
   inp.disabled = false; inp.focus();
-  setTimeout(refreshChatLog, 800); // surface my message quickly
+  setTimeout(refreshChatLog, 800); // pull the agent's transcript to confirm/replace the echo
 }
 function renderSessionMsg(m) {
   const who = m.role === "assistant" ? "🤖 assistant" : m.role === "user" ? "👤 user" : "• " + m.role;
