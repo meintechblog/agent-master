@@ -2233,7 +2233,7 @@ function renderContent() {
   } else if (a.live) {
     actionBtns = `
       <button class="btn btn-secondary" onclick="handleFocus('${active}')" title="Zur Terminal-Session dieses Agents springen">↗ Terminal</button>
-      <button class="btn btn-secondary" onclick="openSessionView('${active}')" title="Session live im Browser ansehen (read-only)">🖥 Session</button>
+      <button class="btn btn-secondary" onclick="openSessionView('${active}')" title="Mit diesem Agenten chatten + Session live mitlesen">💬 Chat</button>
       <button class="btn btn-warning" onclick="handleSoftStop('${active}')" title="Save & Push, dann hart-stop nach 5 Min">💤 Soft-Stop</button>
       <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Hart-Stop</button>`;
   } else {
@@ -2584,7 +2584,7 @@ function openSessionView(key) {
   ov.innerHTML = `
     <div class="session-card">
       <div class="session-head">
-        <span>🖥 Session — <b>${key}</b></span>
+        <span>💬 Chat — <b>${key}</b></span>
         <span style="flex:1"></span>
         <button class="btn btn-secondary" onclick="handleFocus('${key}')" title="ins echte Terminal springen">↗ Terminal</button>
         <button class="btn btn-secondary" onclick="closeSessionView()">✕</button>
