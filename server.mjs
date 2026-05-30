@@ -1473,13 +1473,16 @@ async function writeRegistryAtomic(registry) {
 
 // === Registry self-fill ===
 // Agents keep their OWN registry entry alive via POST /api/registry/self-update.
-// A scheduler nudges one live agent every 10 min (thinnest / least-recently
-// prompted first), so entries get populated initially and refreshed over time
-// without the operator hand-curating them. Offline agents aren't auto-spawned —
-// they get the same instruction in the spawn briefing and on their next online tick.
+// A scheduler checks every 10 min and nudges AT MOST ONE live agent — but only
+// one whose entry is genuinely incomplete (missing capabilities/when_to_use) AND
+// that hasn't been nudged in the last cooldown. Complete entries are never
+// nudged; a still-thin agent gets at most one reminder per cooldown. This keeps
+// agent load minimal — the tick is a cheap local check and usually sends nothing.
+// Offline agents aren't auto-spawned — they get the same instruction in the
+// spawn briefing and on their next online tick.
 const REGISTRY_FILL_PATH = path.join(__dirname, "data", "registry-fill.json");
 const REGISTRY_FILL_INTERVAL_MS = 10 * 60 * 1000;
-const REGISTRY_FILL_REFRESH_MS = 21 * 24 * 60 * 60 * 1000; // re-prompt a filled entry at most every ~3 weeks
+const REGISTRY_FILL_REFRESH_MS = 21 * 24 * 60 * 60 * 1000; // cooldown: re-nudge a still-thin entry at most every ~3 weeks
 const REGISTRY_FILLABLE = new Set([
   "capabilities", "when_to_use", "owned_endpoints", "mqtt_topics",
   "depends_on", "tags", "description", "display_name", "service_url",
@@ -1488,7 +1491,10 @@ const REGISTRY_FILLABLE = new Set([
 
 function registryEntryIsThin(a) {
   const n = (x) => (Array.isArray(x) ? x.length : 0);
-  return n(a.capabilities) === 0 || n(a.when_to_use) === 0 || n(a.owned_endpoints) === 0;
+  // owned_endpoints is intentionally NOT required: many agents legitimately have
+  // no HTTP API, so gating on it flagged them "thin" forever → endless pointless
+  // nudges. An entry counts as filled once it has capabilities + when_to_use.
+  return n(a.capabilities) === 0 || n(a.when_to_use) === 0;
 }
 
 function registryFillPrompt(key) {
@@ -1519,9 +1525,14 @@ async function registryFillTick() {
       if (key === "agent-master") return false;        // Hub curates its own entry
       if (a.deployment?.type === "alias" || a.alias_for) return false; // aliases mirror their target
       if (!liveCwds.has(a.repo)) return false;          // only nudge agents that are online
+      // Minimal load: nudge ONLY genuinely incomplete entries, and each such
+      // agent at most once per cooldown (REFRESH_MS). Complete entries are never
+      // nudged; a thin agent that doesn't fill gets one gentle reminder per ~3
+      // weeks, not every tick.
+      if (!registryEntryIsThin(a)) return false;
       const st = fillState[key] || {};
-      const stale = !st.last_prompted_at || now - st.last_prompted_at > REGISTRY_FILL_REFRESH_MS;
-      return registryEntryIsThin(a) || stale;
+      const recentlyPrompted = st.last_prompted_at && now - st.last_prompted_at <= REGISTRY_FILL_REFRESH_MS;
+      return !recentlyPrompted;
     });
     if (candidates.length === 0) return;
     candidates.sort((x, y) => (fillState[x[0]]?.last_prompted_at || 0) - (fillState[y[0]]?.last_prompted_at || 0));
