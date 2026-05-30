@@ -1461,14 +1461,26 @@
     .view-toggle { width: 100%; flex-wrap: wrap; gap: 6px; }
     .view-toggle .view-btn { flex: 1 1 auto; }
     .sse-pill, .usage-bar, .usage-toggle, .stats { display: none; } /* declutter on phone */
-    /* Stack: agent list on top (scrollable strip), detail below. */
+    /* Stack: agent list becomes a single horizontal scroll-strip of chips on top,
+       detail gets the rest of the screen. Far better than a 40vh vertical block. */
     .layout { grid-template-columns: 1fr; }
     nav.tabs {
-      max-height: 40vh; overflow-y: auto;
+      display: flex; flex-direction: row; flex-wrap: nowrap;
+      overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+      gap: 6px; padding: 8px 10px; max-height: none;
       border-right: none; border-bottom: 1px solid var(--border, #222);
+      scrollbar-width: thin;
     }
+    nav.tabs button.tab {
+      flex: 0 0 auto; width: auto; min-height: 40px;       /* bigger touch target */
+      padding: 8px 12px; border-radius: 8px;
+    }
+    nav.tabs .tab-llm-dots { display: none; }              /* declutter chips */
+    nav.tabs button.tab-new { flex: 0 0 auto; width: auto; }
     main#content { padding: 14px; }
     .panel-title { font-size: 18px; }
+    /* Bigger tap targets for the per-agent affordances on touch */
+    .tab-focus, .tab-softstop { font-size: 15px; padding: 4px 6px; }
     .status-strip { flex-wrap: wrap; gap: 6px; }
     .status-strip > span[style*="margin-left:auto"] { margin-left: 0 !important; }
     .btn { padding: 7px 11px; font-size: 13px; }
