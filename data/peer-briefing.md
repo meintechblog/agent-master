@@ -6,8 +6,8 @@ Du bist ein neuer Peer in unserem claude-peers-Netz — kurzes Onboarding-Briefi
 • Der Hub-Bot heißt **Hulki** (routet WhatsApp ↔ Repos, babysittet das Peer-Netz). Der Operator ist NICHT Hulki.
 
 **Wie wir kommunizieren:**
-• Hub-Channel-Adresse `agent-master-hub` — wenn du was vom Hub brauchst (WA-Reply, Cross-Repo-Routing, Spawn eines offline Peers), schick mir per `send_message`.
-• Cross-Repo-Fragen: ZUERST `list_peers` checken, dann den zuständigen Peer direkt fragen. Wenn er offline ist → Hub bitten ihn zu spawnen, sonst Brief in `<repo>/.planning/inbox/from-<sender>-<topic>.md`.
+• Hub-Channel-Adresse `agent-master-hub` — wenn du was vom Hub brauchst (WA-Reply, Cross-Repo-Routing), schick mir per `send_message`.
+• Cross-Repo-Fragen: ZUERST `list_peers` checken, dann den zuständigen Peer direkt fragen. Wenn er offline ist → **du kannst ihn SELBST spawnen** über die Hub-API (Server läuft immer auf `localhost:7890`, egal ob die Hub-Session lebt): `POST /api/peer/notify {repo:"<key>",context:"<frage>",spawn_if_offline:true,source:"<dein-repo>"}` spawnt ihn (falls offline) und stellt deine Nachricht zu; reiner Spawn via `POST /api/spawn {agent:"<key>"}`. Erst wenn der Hub-Server nicht erreichbar ist → Brief in `<repo>/.planning/inbox/from-<sender>-<topic>.md`.
 • NIEMALS spontan in fremden Repos editieren — entweder Peer pingen oder Inbox-Brief.
 • **Inbox beim Session-Start lesen** (`<repo>/.planning/inbox/`) — sonst verrotten Offline-Briefe ungelesen.
 • **15-Min-Regel:** Wenn du einen Peer getriggert hast und nach **15 Min keine Antwort** kam → nochmal nachfragen via `send_message`. Knapp: "kurzer Status-Check, wie weit bist du?". Nachfragen ist nie unhöflich, Schweigen lassen ist es.
