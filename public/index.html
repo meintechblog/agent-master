@@ -366,6 +366,9 @@
   .tab-focus:hover { opacity: 1; background: rgba(255,255,255,0.08); color: var(--accent); }
   .tab-focus.waiting { opacity: 1; color: var(--yellow); animation: waitpulse 1.6s ease-in-out infinite; }
   .tab.waiting { box-shadow: inset 3px 0 0 var(--yellow); }
+  .tab.softstopping { box-shadow: inset 3px 0 0 var(--red, #e74c3c); }
+  .tab-softstop { margin-left: 6px; cursor: pointer; font-size: 11px; color: var(--red, #e74c3c); padding: 0 3px; border-radius: 4px; animation: waitpulse 1.2s ease-in-out infinite; }
+  .tab-softstop:hover { background: rgba(231,76,60,0.15); }
   @keyframes waitpulse { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
   /* Agent matrix */
   .matrix-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -2001,7 +2004,8 @@ function renderTabs() {
   tabs.innerHTML = "";
   for (const [key, agent] of entries) {
     const btn = document.createElement("button");
-    btn.className = "tab" + (active === key ? " active" : "") + (agent.waiting ? " waiting" : "");
+    const ssPending = state.soft_stops && state.soft_stops[key];
+    btn.className = "tab" + (active === key ? " active" : "") + (agent.waiting ? " waiting" : "") + (ssPending ? " softstopping" : "");
     const usage = llmLive.by_caller?.[key];
     const now = llmLive.now || Date.now();
     let dotsHtml = "";
@@ -2036,6 +2040,7 @@ function renderTabs() {
       <span class="tab-name">${key}</span>
       ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
+      ${ssPending ? `<span class="tab-softstop" title="Soft-Stop läuft — klick zum Abbrechen" onclick="event.stopPropagation();handleSoftStopCancel('${key}')">💤↩︎</span>` : ""}
       ${agent.live ? `<span class="tab-focus${agent.waiting ? " waiting" : ""}" title="${agent.waiting ? "wartet auf deine Eingabe — zur Session springen" : "Zur Terminal-Session springen"}" onclick="event.stopPropagation();handleFocus('${key}')">${agent.waiting ? "⏳" : "↗"}</span>` : ""}
     `;
     btn.onclick = () => selectAgent(key);
