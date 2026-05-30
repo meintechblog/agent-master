@@ -2577,6 +2577,15 @@ function resolveLive(agent, registry, liveByCwd) {
 // tool call also looks idle until it appends). Cached 5 s so SSE ticks stay cheap.
 const PROJECTS_DIR = path.join(process.env.HOME || "", ".claude", "projects");
 const IDLE_CACHE_MS = 5000;
+// An agent counts as "actively working" (vs. merely having an open terminal) when
+// it is live, NOT sitting on the operator (waiting=false), AND its transcript was
+// appended within this window — i.e. it's grinding through tool calls / output
+// right now. Generous enough to span a legit long single tool call (build, fetch);
+// the documented mtime-freeze caveat means a >2min silent tool call reads as idle.
+const ACTIVE_WINDOW_MS = 120000;
+function isAgentActive(live, act) {
+  return !!(live && act && !act.waiting && act.last_activity_at && (Date.now() - act.last_activity_at) < ACTIVE_WINDOW_MS);
+}
 const idleCache = new Map(); // slug -> { ts, at }
 function cwdToProjectSlug(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -2706,8 +2715,12 @@ async function broadcastStatus() {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
     const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
     const agents = {};
+    let activeCount = 0;
     for (const [key, agent] of Object.entries(registry.agents)) {
       const live = resolveLive(agent, registry, liveByCwd);
+      const act = live ? await getAgentActivity(live.cwd) : null;
+      const active = isAgentActive(live, act);
+      if (active) activeCount++;
       agents[key] = {
         ...agent,
         key,
@@ -2717,13 +2730,15 @@ async function broadcastStatus() {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
-        last_activity_at: live ? (await getAgentActivity(live.cwd)).last_activity_at : null,
-        waiting: live ? (await getAgentActivity(live.cwd)).waiting : false,
+        last_activity_at: act?.last_activity_at ?? null,
+        waiting: act?.waiting ?? false,
+        active,
       };
     }
     const payload = {
       agents,
       online_count: peers.length,
+      active_count: activeCount,
       total_count: Object.keys(registry.agents).length,
       meta: registry._meta || null,
       soft_stops: Object.fromEntries(softStopState),
@@ -3214,8 +3229,12 @@ async function handleApi(req, res, url) {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
     const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
     const agents = {};
+    let activeCount = 0;
     for (const [key, agent] of Object.entries(registry.agents)) {
       const live = resolveLive(agent, registry, liveByCwd);
+      const act = live ? await getAgentActivity(live.cwd) : null;
+      const active = isAgentActive(live, act);
+      if (active) activeCount++;
       agents[key] = {
         ...agent,
         key,
@@ -3225,13 +3244,15 @@ async function handleApi(req, res, url) {
         live_summary: live?.summary || null,
         pid: live?.pid || null,
         tty: live?.tty || null,
-        last_activity_at: live ? (await getAgentActivity(live.cwd)).last_activity_at : null,
-        waiting: live ? (await getAgentActivity(live.cwd)).waiting : false,
+        last_activity_at: act?.last_activity_at ?? null,
+        waiting: act?.waiting ?? false,
+        active,
       };
     }
     return send(200, {
       agents,
       online_count: peers.length,
+      active_count: activeCount,
       total_count: Object.keys(registry.agents).length,
       meta: registry._meta || null,
       soft_stops: Object.fromEntries(softStopState),

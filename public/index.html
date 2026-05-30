@@ -204,6 +204,7 @@
     white-space: nowrap;
   }
   .stats .live { color: var(--green); font-weight: 600; }
+  .stats .active { color: var(--accent, #6cf); font-weight: 700; }
   .layout {
     display: grid;
     grid-template-columns: 280px 1fr;
@@ -1550,6 +1551,7 @@
   </div>
   <button class="usage-toggle" id="usage-toggle" onclick="toggleUsageDetails()">▼ Details</button>
   <div class="stats">
+    <span class="active" id="active-count" title="arbeiten gerade wirklich (nicht idle / nicht auf Eingabe wartend)">–</span> aktiv ·
     <span class="live" id="online-count">–</span> /
     <span id="total-count">–</span> Agenten ·
     <span id="last-update">–</span>
@@ -2777,6 +2779,7 @@ function render() {
   renderContent();
   renderUsage();
   if (view === "matrix") renderMatrix();
+  document.getElementById("active-count").textContent = state.active_count ?? "–";
   document.getElementById("online-count").textContent = state.online_count;
   document.getElementById("total-count").textContent = state.total_count;
   document.getElementById("last-update").textContent = fmtTime();
@@ -2988,9 +2991,13 @@ function renderMatrix() {
       const ghUrl = a.repo_url ? a.repo_url.replace(/\s*\(.*\)\s*$/, "").trim() : "";
       const gh = ghUrl ? `<a class="mx-ext" href="${ghUrl}" target="_blank" rel="noopener">GitHub ↗</a>` : `<span class="mx-no">—</span>`;
       const waitDot = a.waiting ? ` <span title="wartet auf deine Eingabe" style="color:var(--yellow)">⏳</span>` : "";
+      const activeDot = a.active ? ` <span title="arbeitet gerade" style="color:var(--accent,#6cf)">⚙</span>` : "";
+      const liveCell = a.live
+        ? (a.active ? '<span style="color:var(--accent,#6cf)">⚙ arbeitet</span>' : (a.waiting ? '<span style="color:var(--yellow)">⏳ wartet</span>' : "live · idle"))
+        : '<span class="mx-no">offline</span>';
       return `<tr>
-        <td><span class="mx-dot ${a.live ? "live" : "offline"}"></span><a class="agent-link" onclick="selectAgent('${key}')">${key}</a>${waitDot}</td>
-        <td>${a.live ? "live" : '<span class="mx-no">offline</span>'}</td>
+        <td><span class="mx-dot ${a.live ? "live" : "offline"}"></span><a class="agent-link" onclick="selectAgent('${key}')">${key}</a>${activeDot}${waitDot}</td>
+        <td>${liveCell}</td>
         <td>${idle}</td>
         <td>${web}</td>
         <td style="text-align:center">${au}</td>
