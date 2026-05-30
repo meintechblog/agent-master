@@ -3,7 +3,7 @@ Du bist ein neuer Peer in unserem claude-peers-Netz — kurzes Onboarding-Briefi
 
 **Identität & Kontakt:**
 • Operator-Identität, Kontaktwege und Email-Konventionen stehen in `~/.claude/CLAUDE.md` (wird in jeder Session geladen, schon in deinem Kontext) — NICHT in diesem Repo. Im Zweifel dort nachsehen oder den Operator kurz fragen.
-• Der Hub-Bot heißt **Hulki** (routet WhatsApp ↔ Repos, babysittet das Peer-Netz). Der Operator ist NICHT Hulki.
+• Der Hub-Bot heißt **{{HUB_NAME}}** (routet WhatsApp ↔ Repos, babysittet das Peer-Netz). Der Operator ist NICHT {{HUB_NAME}}.
 
 **Wie wir kommunizieren:**
 • Hub-Channel-Adresse `agent-master-hub` — wenn du was vom Hub brauchst (WA-Reply, Cross-Repo-Routing), schick mir per `send_message`.

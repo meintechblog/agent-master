@@ -114,7 +114,7 @@ const SOFT_STOP_GRACE_MS = 5 * 60 * 1000;
 const SOFT_STOP_TICK_MS = 15 * 1000;
 const SOFT_STOP_PROMPT = `Speichere alles aus der heutigen Session vernünftig ab, damit ich mal ein /clear machen kann und mit "weiter" Dann nahtlos mit dir weiterarbeiten kann - und denk dran ans Committen und Pushen und was egal, was nicht alles, damit eben alles rund ist. Wenn sonst noch was wichtiges offen ist -> autonom durchziehen. Schau, dass GitHub auch gerade gezogen ist und die Dokumentation dort passt.
 
-(Soft-Stop von Hulki-Hub. Du hast 5 Min. Wenn du mehr Zeit brauchst, ruf einmal:
+(Soft-Stop von <HUB>-Hub. Du hast 5 Min. Wenn du mehr Zeit brauchst, ruf einmal:
   curl -X POST http://localhost:7890/api/soft-stop-extend -H 'Content-Type: application/json' -d '{"agent":"<KEY>"}'
 und du bekommst +5 Min — danach erfolgt ein hard-stop (SIGTERM + close tab) automatisch.)`;
 
@@ -471,6 +471,15 @@ async function readRegistry() {
   return JSON.parse(await fs.readFile(target, "utf8"));
 }
 
+// The name the Hub identifies as toward peers — operator-configurable via
+// _meta.hub_name (see docs/REGISTRY.md), neutral fallback when unset. Used in
+// every peer-facing string so a downstream operator with a different hub_name
+// (e.g. "Aurora") doesn't see the original author's "Hulki" in their sessions.
+const hubNameFrom = (registry) => registry?._meta?.hub_name?.trim() || "agent-master";
+async function getHubName() {
+  try { return hubNameFrom(await readRegistry()); } catch { return "agent-master"; }
+}
+
 // === New-peer briefing ===
 //
 // Background loop: every BRIEFING_POLL_MS, fetch the peer list and send a
@@ -504,10 +513,20 @@ async function saveBriefedPeers() {
   }
 }
 
-async function getBriefingText() {
+// Raw template as stored on disk — placeholders intact. Use for the editor so
+// an edit round-trip doesn't bake the resolved hub name into the file.
+async function getBriefingRaw() {
   if (!existsSync(BRIEFING_MD_PATH)) return null;
   const txt = (await fs.readFile(BRIEFING_MD_PATH, "utf8")).trim();
   return txt || null;
+}
+
+// Resolved briefing actually sent to peers: {{HUB_NAME}} → operator-configured
+// _meta.hub_name (see hubNameFrom).
+async function getBriefingText() {
+  const txt = await getBriefingRaw();
+  if (!txt) return null;
+  return txt.includes("{{HUB_NAME}}") ? txt.replaceAll("{{HUB_NAME}}", await getHubName()) : txt;
 }
 
 async function briefPeer(peer, { force = false } = {}) {
@@ -1388,6 +1407,7 @@ function runQuiet(cmd, args, opts = {}) {
 
 async function scaffoldAgentRepo(cwd, name, mission) {
   await fs.mkdir(cwd, { recursive: true });
+  const hubName = await getHubName();
   const claudeMd =
 `# ${name}
 
@@ -1405,7 +1425,7 @@ Jörg. Identität, Email-Tabelle, WA-Kontakt: siehe globales \`~/.claude/CLAUDE.
 
 ## Hub-Anbindung
 
-Diese Session ist Teil des claude-peers-Netzwerks (Hub = agent-master / "Hulki" auf \`localhost:7890\`). Cross-Repo-Fragen gehen via \`mcp__claude-peers__send_message\`, nicht via Repo-Wechsel.
+Diese Session ist Teil des claude-peers-Netzwerks (Hub = agent-master / "${hubName}" auf \`localhost:7890\`). Cross-Repo-Fragen gehen via \`mcp__claude-peers__send_message\`, nicht via Repo-Wechsel.
 `;
   const gitignore =
 `# OS
@@ -1788,7 +1808,7 @@ async function softStopAgent(repoKey, registry) {
   const peer = peers.find((p) => p.cwd === agent.repo);
   if (!peer) return { not_running: true, agent: repoKey };
 
-  const msg = SOFT_STOP_PROMPT.replace("<KEY>", repoKey);
+  const msg = SOFT_STOP_PROMPT.replace("<KEY>", repoKey).replace("<HUB>", hubNameFrom(registry));
   await sendChannelMessage(peer.id, msg);
 
   const now = Date.now();
@@ -1819,7 +1839,7 @@ async function softStopExtendAgent(repoKey) {
   try {
     await sendChannelMessage(
       state.peer_id,
-      `✓ Verlängerung gewährt — du hast +5 Min. Neuer hard-stop: ${new Date(state.hard_stop_at).toISOString()}. Mehr Verlängerungen sind nicht möglich. — Hulki (Hub)`
+      `✓ Verlängerung gewährt — du hast +5 Min. Neuer hard-stop: ${new Date(state.hard_stop_at).toISOString()}. Mehr Verlängerungen sind nicht möglich. — ${await getHubName()} (Hub)`
     );
   } catch (e) {
     console.warn("[soft-stop] could not notify peer of extension:", e.message);
@@ -1834,7 +1854,7 @@ async function softStopCancelAgent(repoKey) {
   softStopState.delete(repoKey);
   persistSoftStopState();
   try {
-    await sendChannelMessage(state.peer_id, `Soft-Stop wurde abgebrochen — du kannst weitermachen. — Hulki (Hub)`);
+    await sendChannelMessage(state.peer_id, `Soft-Stop wurde abgebrochen — du kannst weitermachen. — ${await getHubName()} (Hub)`);
   } catch {}
   await fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} soft-stop ${repoKey} cancelled\n`);
   return { ok: true, agent: repoKey };
@@ -1854,7 +1874,7 @@ async function softStopTick() {
           : `Letzte Chance für +5 Min:\n  curl -X POST http://localhost:7890/api/soft-stop-extend -H 'Content-Type: application/json' -d '{"agent":"${repoKey}"}'`;
         await sendChannelMessage(
           state.peer_id,
-          `⏰ 30 Sek bis hard-stop. ${extHint} — Hulki (Hub)`
+          `⏰ 30 Sek bis hard-stop. ${extHint} — ${await getHubName()} (Hub)`
         );
       } catch {}
     }
@@ -3085,12 +3105,15 @@ async function handleApi(req, res, url) {
   // Helps Jörg see whether new peers actually get the message and edit the
   // text without ssh-ing into the box.
   if (req.method === "GET" && url.pathname === "/api/briefing") {
-    const text = await getBriefingText();
+    const raw = await getBriefingRaw();        // editable template ({{HUB_NAME}} intact)
+    const resolved = await getBriefingText();  // what peers actually receive
     const history = Object.fromEntries(briefedPeers);
     return send(200, {
       briefing_path: BRIEFING_MD_PATH,
-      briefing_bytes: text ? text.length : 0,
-      briefing_text: text || null,
+      briefing_bytes: raw ? raw.length : 0,
+      briefing_text: raw || null,
+      briefing_resolved: resolved || null,
+      hub_name: await getHubName(),
       poll_interval_ms: BRIEFING_POLL_MS,
       history,
       history_count: briefedPeers.size,
@@ -3748,7 +3771,7 @@ async function handleApi(req, res, url) {
     const reuseIfAlive = parsed.reuse_if_alive !== false;     // default true
     const spawnIfOffline = parsed.spawn_if_offline !== false; // default true
     const source = typeof parsed.source === "string" ? parsed.source.slice(0, 80) : "";
-    const body = `📨 [peer/notify via Hulki-Hub${source ? ` · from ${source}` : ""}]\n${context.slice(0, 4000)}`;
+    const body = `📨 [peer/notify via ${hubNameFrom(registry)}-Hub${source ? ` · from ${source}` : ""}]\n${context.slice(0, 4000)}`;
 
     try {
       const peers = await fetchPeers();
