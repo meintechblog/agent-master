@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **🔲 Agent matrix tab.** A new top-level view with one table over every agent and its properties: status, idle time, Web-App (link), Auto-Update (✓/—), Health, Role, Capabilities count, GitHub. The Auto-Update column is detected automatically by probing `<web>/api/update/check` and requiring an update-check-shaped body (so a catch-all 200 or an alias to the Hub doesn't false-positive); a registry `auto_update: true` field overrides the probe. New endpoint `GET /api/agent-updaters` (5 min cached).
+- **Deep-link agent subpages.** `serveStatic` now falls back to `index.html` for extension-less routes, and a small client router maps `/<agent-key>` → that agent's detail panel and `/matrix` (etc.) → the matching view, with `pushState`/`popstate`. `http://<host>:7890/agent-master` works as a direct, bookmarkable link; the sidebar and matrix rows navigate via these URLs.
+- **`↗ Terminal` jump button.** `POST /api/focus {agent}` brings the agent's Terminal.app window to the front via AppleScript. Resolution order: the window id captured at spawn → the tab whose custom title equals the repoKey (self-heals a stale window id) → tty-match for manually-started sessions. Surfaced as a button in the detail panel and a small `↗` next to every live agent in the sidebar.
+- **Idle time per agent.** `last_activity_at` (newest transcript jsonl mtime in `~/.claude/projects/<slug>/`, 5 s cached) ships in `/api/status` + SSE; the sidebar shows `⏱ <idle>` next to each live agent, turning yellow past 5 min. Caveat: a single long-running tool call also reads as idle until it next appends.
+- **"Waiting for input" indicator.** `getAgentActivity` reads the transcript tail and flags `waiting` when the last message entry is an assistant `end_turn` (or a pending `AskUserQuestion`/`ExitPlanMode`) — i.e. the agent finished and is sitting on the operator. Shown as a pulsing yellow `⏳` on the sidebar jump affordance (replacing `↗`), a yellow rail on the tab, and `⏳` in the matrix; clicking jumps straight to the session. A long `tool_use` step reads as NOT waiting, so it doesn't false-positive the way raw idle time does.
+
+### Changed
+
+- **Spawned tabs keep their agent-name title.** `/api/spawn` now launches `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers`, so Claude Code stops continuously rewriting the Terminal tab title with its task status (Terminal.app is last-writer-wins and was clobbering the repoKey within seconds). Scoped to spawned sessions — the operator's own `claude` sessions keep their activity titles.
+
 ## [0.2.0] - 2026-05-30
 
 ### Changed
