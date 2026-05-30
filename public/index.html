@@ -1452,6 +1452,22 @@
     background: var(--bg, #0a0a0a); color: var(--text, #ddd); font-size: 13px;
   }
   .session-input:focus { outline: none; border-color: var(--accent, #6cf); }
+  /* Inline chat panel in the detail view */
+  .chat-panel { border: 1px solid var(--border, #333); border-radius: 10px; margin: 14px 0 18px; overflow: hidden; }
+  .chat-panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 14px; cursor: pointer; user-select: none;
+    background: var(--panel-2, rgba(255,255,255,0.03)); font-size: 13px; font-weight: 600;
+  }
+  .chat-panel-head:hover { background: rgba(255,255,255,0.05); }
+  .chat-toggle { font-size: 11px; color: var(--text-dim, #999); font-weight: 400; }
+  .chat-panel-body { display: flex; flex-direction: column; }
+  .chat-log {
+    max-height: 360px; overflow-y: auto; padding: 12px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.45;
+  }
+  .chat-foot { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border, #333); }
+  @media (max-width: 640px) { .chat-log { max-height: 50vh; } }
 
   /* Phone / portrait: make the dashboard usable on a narrow screen. */
   @media (max-width: 640px) {
@@ -2233,7 +2249,6 @@ function renderContent() {
   } else if (a.live) {
     actionBtns = `
       <button class="btn btn-secondary" onclick="handleFocus('${active}')" title="Zur Terminal-Session dieses Agents springen">↗ Terminal</button>
-      <button class="btn btn-secondary" onclick="openSessionView('${active}')" title="Mit diesem Agenten chatten + Session live mitlesen">💬 Chat</button>
       <button class="btn btn-warning" onclick="handleSoftStop('${active}')" title="Save & Push, dann hart-stop nach 5 Min">💤 Soft-Stop</button>
       <button class="btn btn-danger" onclick="handleStop('${active}')">⏹ Hart-Stop</button>`;
   } else {
@@ -2243,6 +2258,15 @@ function renderContent() {
   const displayName = a.display_name && a.display_name !== active
     ? `<span style="font-size:14px;color:var(--text-dim);font-weight:400;margin-left:2px">· ${a.display_name}</span>`
     : "";
+  // Preserve the inline chat (input text + log + scroll) across a re-render of the
+  // SAME agent, so a status tick doesn't wipe what I'm typing / reading.
+  let _savedInput = null, _inputFocused = false, _savedLog = null, _savedAtBottom = true;
+  if (_chatRenderedFor === active) {
+    const pi = document.getElementById("chat-input");
+    const pl = document.getElementById("chat-log");
+    if (pi) { _savedInput = pi.value; _inputFocused = document.activeElement === pi; }
+    if (pl) { _savedLog = pl.innerHTML; _savedAtBottom = pl.scrollHeight - pl.scrollTop - pl.clientHeight < 80; }
+  }
   main.innerHTML = `
     <h2 class="panel-title">
       <span style="color:${a.color || "var(--text)"}">●</span>
@@ -2252,14 +2276,25 @@ function renderContent() {
     <p class="panel-sub">${a.description}</p>
 
     <div class="status-strip">
-      ${a.live
-        ? `<span class="status-pill live">● LIVE</span><span class="mono">PID ${a.pid}</span><span class="mono">${a.tty || "no-tty"}</span><span style="color:var(--text-dim);font-size:12px">peer-id: ${a.peer_id}</span>`
-        : `<span class="status-pill offline">○ offline</span>`}
-      <span class="health-led ${hc?.status || 'skip'}" title="health-check"></span>
-      <span style="font-size:12px;color:var(--text-dim)">${hc ? (hc.status + (hc.http_status ? ' (' + hc.http_status + ')' : (hc.reason ? ': ' + hc.reason : ''))) : 'health n/a'}</span>
+      ${a.live ? "" : `<span class="status-pill offline">○ offline</span>`}
       ${actionBtns}
-      <span style="margin-left:auto;color:var(--text-dim);font-size:12px">${a.repo}</span>
     </div>
+
+    ${a.live ? `
+    <div class="chat-panel">
+      <div class="chat-panel-head" onclick="toggleChat()">
+        <span>💬 Chat mit <b>${active}</b></span>
+        <span class="chat-toggle" id="chat-toggle">${isChatCollapsed() ? "▸ aufklappen" : "▾ zuklappen"}</span>
+      </div>
+      <div class="chat-panel-body" id="chat-panel-body" style="display:${isChatCollapsed() ? "none" : "flex"}">
+        <div class="chat-log" id="chat-log"><div class="empty-tip">Lade…</div></div>
+        <div class="chat-foot">
+          <input id="chat-input" class="session-input" placeholder="Nachricht an ${active}… (Enter sendet)"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();sendInlineChat()}">
+          <button class="btn btn-primary" onclick="sendInlineChat()">Senden</button>
+        </div>
+      </div>
+    </div>` : ""}
 
     ${a.live && a.live_summary
       ? `<div class="panel-section"><h3>Aktuelle Tätigkeit</h3><div class="summary-box">${a.live_summary}</div></div>`
@@ -2308,6 +2343,12 @@ function renderContent() {
       Spawn: <code>cd ${a.repo} && claudepeers</code>
     </div>
   `;
+
+  // Restore preserved inline-chat state + (re)attach the poll.
+  if (_savedInput != null) { const ni = document.getElementById("chat-input"); if (ni) { ni.value = _savedInput; if (_inputFocused) ni.focus(); } }
+  if (_savedLog != null) { const nl = document.getElementById("chat-log"); if (nl) { nl.innerHTML = _savedLog; if (_savedAtBottom) nl.scrollTop = nl.scrollHeight; } }
+  _chatRenderedFor = a.live ? active : null;
+  startChatPoll();
 
   if (active === "sonnet-master") loadLlmStats();
 }
@@ -2572,56 +2613,49 @@ function formatIdle(ms) {
   return `${h}h${mr ? " " + mr + "m" : ""}`;
 }
 
-// Read-only "terminal in the browser": live transcript of an agent's session.
-let sessionPoll = null;
-function openSessionView(key) {
-  markAgentUsed(key);
-  closeSessionView();
-  const ov = document.createElement("div");
-  ov.id = "session-overlay";
-  ov.className = "session-overlay";
-  ov.onclick = (e) => { if (e.target === ov) closeSessionView(); };
-  ov.innerHTML = `
-    <div class="session-card">
-      <div class="session-head">
-        <span>💬 Chat — <b>${key}</b></span>
-        <span style="flex:1"></span>
-        <button class="btn btn-secondary" onclick="handleFocus('${key}')" title="ins echte Terminal springen">↗ Terminal</button>
-        <button class="btn btn-secondary" onclick="closeSessionView()">✕</button>
-      </div>
-      <div class="session-body" id="session-body"><div class="empty-tip">Lade…</div></div>
-      <div class="session-foot">
-        <input id="session-input" class="session-input" placeholder="Nachricht an ${key}… (Enter sendet)"
-               onkeydown="if(event.key==='Enter'){event.preventDefault();sendSessionChat('${key}')}">
-        <button class="btn btn-primary" onclick="sendSessionChat('${key}')">Senden</button>
-      </div>
-    </div>`;
-  document.body.appendChild(ov);
-  setTimeout(() => { const i = document.getElementById("session-input"); if (i) i.focus(); }, 100);
-  const load = async () => {
-    try {
-      const d = await (await fetch(`/api/agent-transcript?agent=${encodeURIComponent(key)}&limit=60`)).json();
-      const body = document.getElementById("session-body");
-      if (!body) return;
-      if (!d.messages || !d.messages.length) { body.innerHTML = `<div class="empty-tip">Kein Transcript gefunden${d.live ? "" : " (Agent offline)"}.</div>`; return; }
-      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
-      body.innerHTML = d.messages.map(renderSessionMsg).join("");
-      if (atBottom) body.scrollTop = body.scrollHeight;
-    } catch {}
-  };
-  load();
-  sessionPoll = setInterval(load, 4000);
+// Inline per-agent chat (lives in the detail panel). Sends straight into the
+// agent's session via the broker, polls the transcript. Collapse state is
+// persisted (localStorage chatCollapsed); the active agent is persisted too, so a
+// reload restores the last conversation. Chat only renders while the agent is live.
+let chatPollTimer = null;
+let _chatRenderedFor = null;
+function isChatCollapsed() { return localStorage.getItem("chatCollapsed") === "1"; }
+function toggleChat() {
+  localStorage.setItem("chatCollapsed", isChatCollapsed() ? "0" : "1");
+  const collapsed = isChatCollapsed();
+  const body = document.getElementById("chat-panel-body");
+  const tog = document.getElementById("chat-toggle");
+  if (body) body.style.display = collapsed ? "none" : "flex";
+  if (tog) tog.textContent = collapsed ? "▸ aufklappen" : "▾ zuklappen";
+  if (collapsed) stopChatPoll(); else startChatPoll();
 }
-function closeSessionView() {
-  if (sessionPoll) { clearInterval(sessionPoll); sessionPoll = null; }
-  const ov = document.getElementById("session-overlay");
-  if (ov) ov.remove();
+function stopChatPoll() { if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; } }
+function startChatPoll() {
+  stopChatPoll();
+  const a = state.agents && state.agents[active];
+  if (!a || !a.live || isChatCollapsed() || !document.getElementById("chat-log")) return;
+  refreshChatLog();
+  chatPollTimer = setInterval(refreshChatLog, 4000);
 }
-async function sendSessionChat(key) {
-  const inp = document.getElementById("session-input");
+async function refreshChatLog() {
+  if (!document.getElementById("chat-log")) { stopChatPoll(); return; }
+  const forAgent = active;
+  try {
+    const d = await (await fetch(`/api/agent-transcript?agent=${encodeURIComponent(forAgent)}&limit=60`)).json();
+    const el = document.getElementById("chat-log");
+    if (!el || active !== forAgent) return; // switched agents mid-fetch
+    if (!d.messages || !d.messages.length) { el.innerHTML = `<div class="empty-tip">Noch kein Verlauf.</div>`; return; }
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    el.innerHTML = d.messages.map(renderSessionMsg).join("");
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  } catch {}
+}
+async function sendInlineChat() {
+  const inp = document.getElementById("chat-input");
   if (!inp) return;
   const text = inp.value.trim();
   if (!text) return;
+  const key = active;
   markAgentUsed(key);
   inp.value = ""; inp.disabled = true;
   try {
@@ -2631,7 +2665,7 @@ async function sendSessionChat(key) {
     if (!res.ok) alert("Senden fehlgeschlagen: " + (res.error === "agent_offline" ? `${key} ist offline` : (res.error || "unbekannt")));
   } catch (e) { alert("Fehler: " + e.message); }
   inp.disabled = false; inp.focus();
-  // the 4s transcript poll surfaces the agent's reply
+  setTimeout(refreshChatLog, 800); // surface my message quickly
 }
 function renderSessionMsg(m) {
   const who = m.role === "assistant" ? "🤖 assistant" : m.role === "user" ? "👤 user" : "• " + m.role;
@@ -2731,6 +2765,7 @@ function switchView(v, push = true) {
   if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
   if (v === "matrix") loadMatrix(false);
+  if (v !== "agents") stopChatPoll();
   if (push) {
     const target = v === "agents" ? (active ? "/" + active : "/") : "/" + v;
     if (location.pathname !== target) history.pushState({ view: v, active }, "", target);
@@ -2741,6 +2776,7 @@ function switchView(v, push = true) {
 function selectAgent(key) {
   active = key;
   markAgentUsed(key);
+  try { localStorage.setItem("activeAgent", key); } catch {}
   switchView("agents", false);
   if (location.pathname !== "/" + key) history.pushState({ active: key }, "", "/" + key);
   render();
@@ -3516,8 +3552,15 @@ async function init() {
   try {
     const r = await fetch("/api/status");
     state = await r.json();
-    const live = Object.entries(state.agents).find(([k, a]) => a.live);
-    active = live ? live[0] : Object.keys(state.agents)[0];
+    // Restore the last agent I was on (persisted), else first live, else first.
+    let saved = null;
+    try { saved = localStorage.getItem("activeAgent"); } catch {}
+    if (saved && state.agents[saved]) {
+      active = saved;
+    } else {
+      const live = Object.entries(state.agents).find(([k, a]) => a.live);
+      active = live ? live[0] : Object.keys(state.agents)[0];
+    }
   } catch {}
   await refreshHealthInBackground();
   render();
