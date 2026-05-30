@@ -2324,12 +2324,21 @@ function renderMqtt(m) {
   return `<div class="deploy-grid"><div class="k">pub</div><div class="mono">${pub}</div><div class="k">sub</div><div class="mono">${sub}</div></div>`;
 }
 
+// live_dashboards entries come in two shapes across the registry: plain strings
+// ("http://… (label)") and objects ({name,url}). Normalize to {url,label} so
+// renderers never assume one shape (an object hitting String.replace threw and
+// blanked the whole detail panel).
+function normalizeDashboard(d) {
+  if (typeof d === "string") return { url: (d.match(/https?:\/\/[^\s)]+/) || [""])[0], label: d };
+  if (d && typeof d === "object") return { url: d.url || d.href || "", label: d.name || d.url || d.href || "" };
+  return { url: "", label: "" };
+}
 // Primary live web URL of an agent: first http(s) URL in live_dashboards,
 // else health_check.url if it's an http URL. Returns null if none.
 function primaryWebUrl(a) {
   for (const d of (a.live_dashboards || [])) {
-    const m = String(d).match(/https?:\/\/[^\s)]+/);
-    if (m) return m[0];
+    const u = normalizeDashboard(d).url;
+    if (u) return u;
   }
   const hu = a.health_check && a.health_check.url;
   if (hu && /^https?:\/\//.test(hu)) return hu;
@@ -2345,7 +2354,13 @@ function renderContent() {
   const a = state.agents[active];
   const hc = healthData.checks?.[active];
   const dashboards = (a.live_dashboards || [])
-    .map((d) => `<li>${d.replace(/(https?:\/\/[^\s)]+)/g, '<a href="$1" target="_blank" style="color:var(--accent)">$1</a>')}</li>`)
+    .map((d) => {
+      const { url, label } = normalizeDashboard(d);
+      if (!url) return label ? `<li>${escapeHtml(String(label))}</li>` : "";
+      const name = (typeof d === "object" && d && d.name) ? `${escapeHtml(d.name)}: ` : "";
+      return `<li>${name}<a href="${url}" target="_blank" style="color:var(--accent)">${escapeHtml(url)}</a></li>`;
+    })
+    .filter(Boolean)
     .join("");
   const memrefs = (a.memory_refs || []).map((m) => `<span class="chip mono">${m}</span>`).join("");
   const caps = (a.capabilities || []).map((c) => `<span class="chip" style="border-color:${a.color || "var(--border)"}">${c}</span>`).join("");
@@ -3110,7 +3125,7 @@ function renderMatrix() {
   const rows = Object.entries(state.agents)
     .sort((a, b) => (b[1].live ? 1 : 0) - (a[1].live ? 1 : 0) || a[0].localeCompare(b[0]))
     .map(([key, a]) => {
-      const webUrl = a.service_url || (a.live_dashboards && a.live_dashboards[0] && a.live_dashboards[0].url) || "";
+      const webUrl = a.service_url || primaryWebUrl(a) || "";
       const web = webUrl
         ? `<a class="mx-ext" href="${webUrl}" target="_blank" rel="noopener">🌐 ${webUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a>`
         : `<span class="mx-no">—</span>`;

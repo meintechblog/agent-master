@@ -2578,10 +2578,19 @@ async function fetchHealth(registry, force = false) {
 // Cached 5 min — these are cross-LAN HTTP calls.
 const UPDATER_CACHE_MS = 5 * 60 * 1000;
 let updaterCache = { data: null, at: 0 };
+// live_dashboards entries are either plain strings ("http://… (label)") or
+// objects ({name,url}). Return the first usable http(s) URL regardless of shape.
+function firstDashboardUrl(agent) {
+  for (const d of (Array.isArray(agent.live_dashboards) ? agent.live_dashboards : [])) {
+    if (typeof d === "string") { const m = d.match(/https?:\/\/[^\s)]+/); if (m) return m[0]; }
+    else if (d && (d.url || d.href)) return d.url || d.href;
+  }
+  return null;
+}
 function agentWebBase(agent) {
   const raw =
     agent.service_url ||
-    (Array.isArray(agent.live_dashboards) && agent.live_dashboards[0]?.url) ||
+    firstDashboardUrl(agent) ||
     agent.health_check?.url ||
     null;
   if (!raw) return null;
