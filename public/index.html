@@ -2282,6 +2282,21 @@ function renderEndpoints(eps) {
   return eps.map((e) => `<div class="endpoint-row"><span class="m">${e.method}</span> ${e.path}${e.purpose ? ' <span style="color:var(--text-dim)">— ' + e.purpose + '</span>' : ''}</div>`).join("");
 }
 
+// Recurring/periodic triggers an agent runs (cron, intervals, loops, watchers,
+// detectors). Each agent declares its own via /api/registry/self-update so the
+// operator can see all standing fleet load in one place. Entries: string, or
+// { name, schedule, note?, loads_agents? }.
+function renderRecurringTasks(tasks) {
+  if (!Array.isArray(tasks) || !tasks.length) return '<span class="empty-tip">keine deklariert</span>';
+  return '<ul class="when-list">' + tasks.map((t) => {
+    if (typeof t === "string") return `<li>⏱ ${escapeHtml(t)}</li>`;
+    const sched = t.schedule ? ` <span style="color:var(--text-dim)">· ${escapeHtml(String(t.schedule))}</span>` : "";
+    const loads = (t.loads_agents || t.targets) ? ` <span style="color:var(--yellow)" title="triggert/weckt andere Agenten">↯ lädt Agenten</span>` : "";
+    const note = t.note ? `<div style="color:var(--text-dim);font-size:12px">${escapeHtml(String(t.note))}</div>` : "";
+    return `<li>⏱ <b>${escapeHtml(String(t.name || "task"))}</b>${sched}${loads}${note}</li>`;
+  }).join("") + "</ul>";
+}
+
 function renderMqtt(m) {
   if (!m) return '<span class="empty-tip">–</span>';
   const pub = (m.publishes || []).join(", ") || "–";
@@ -2423,6 +2438,11 @@ function renderContent() {
     <div class="panel-section">
       <h3>Owned Endpoints</h3>
       ${renderEndpoints(a.owned_endpoints)}
+    </div>
+
+    <div class="panel-section">
+      <h3>⏱ Wiederkehrende Tasks</h3>
+      ${renderRecurringTasks(a.recurring_tasks)}
     </div>
 
     <div class="panel-section">

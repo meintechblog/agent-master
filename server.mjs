@@ -1486,7 +1486,7 @@ const REGISTRY_FILL_REFRESH_MS = 21 * 24 * 60 * 60 * 1000; // cooldown: re-nudge
 const REGISTRY_FILLABLE = new Set([
   "capabilities", "when_to_use", "owned_endpoints", "mqtt_topics",
   "depends_on", "tags", "description", "display_name", "service_url",
-  "live_dashboards", "repo_url",
+  "live_dashboards", "repo_url", "recurring_tasks",
 ]);
 
 function registryEntryIsThin(a) {
@@ -1503,7 +1503,8 @@ function registryFillPrompt(key) {
     `Trag deine ECHTEN Werte autonom ein (kein Rückfragen nötig), per HTTP:`,
     `  curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type: application/json' \\`,
     `    -d '{"agent":"${key}","capabilities":["…"],"when_to_use":["wann man dich ansprechen soll"],"owned_endpoints":[{"method":"GET","path":"/api/…","purpose":"…"}],"description":"1 Satz","service_url":"http://…(falls du eine Web-UI hast)"}'`,
-    `Felder (nur die setzen, die du füllen willst): capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url.`,
+    `Felder (nur die setzen, die du füllen willst): capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks.`,
+    `PFLICHT bei recurring_tasks: deklariere ALLE wiederkehrenden/periodischen Trigger deines Dienstes (Cron, Intervalle, Loops, Watcher, Detektoren) — Format [{"name":"…","schedule":"alle 10 min|stündlich|…","note":"was es tut","loads_agents":true/false}]. loads_agents:true wenn es andere Agenten triggert/weckt. Transparenz für den Operator über stehende Fleet-Last.`,
     `Es wird gemerged (bestehende Felder bleiben, du überschreibst gezielt). Halte es knapp + ehrlich. Danke!`,
   ].join("\n");
 }
@@ -2913,7 +2914,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/agents",           purpose: "filtered agent list",
           query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
         { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
-        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url.", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }] } },
+        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks (declare ALL periodic triggers: [{name,schedule,note,loads_agents}]).", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }], recurring_tasks: [{ name: "…", schedule: "alle 10 min", note: "…", loads_agents: false }] } },
         { method: "GET",  path: "/api/agent-transcript",  purpose: "read-only recent session transcript of an agent (browser 'terminal' view). ?agent=<key>&limit=40" },
         { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
         { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached (+ self: version/commit)" },

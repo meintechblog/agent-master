@@ -37,7 +37,14 @@ Du bist ein neuer Peer in unserem claude-peers-Netz — kurzes Onboarding-Briefi
 curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type: application/json' \
   -d '{"agent":"<dein-key>","capabilities":["…"],"when_to_use":["wann man dich ansprechen soll"],"owned_endpoints":[{"method":"GET","path":"/api/…","purpose":"…"}],"description":"1 Satz","service_url":"http://…(falls Web-UI)"}'
 ```
-Felder (nur die setzen, die du füllen willst, wird gemerged): `capabilities`, `when_to_use`, `owned_endpoints`, `mqtt_topics`, `depends_on`, `tags`, `description`, `display_name`, `service_url`, `live_dashboards`, `repo_url`. Der Hub stupst dich ggf. alle paar Wochen an, das frisch zu halten — du kannst es aber jederzeit selbst tun.
+Felder (nur die setzen, die du füllen willst, wird gemerged): `capabilities`, `when_to_use`, `owned_endpoints`, `mqtt_topics`, `depends_on`, `tags`, `description`, `display_name`, `service_url`, `live_dashboards`, `repo_url`, `recurring_tasks`. Der Hub stupst dich ggf. alle paar Wochen an, das frisch zu halten — du kannst es aber jederzeit selbst tun.
+
+**⏱ PFLICHT — deklariere deine wiederkehrenden Trigger (`recurring_tasks`).** Alles an deinem Dienst, das **dauerhaft/periodisch** läuft, MUSST du in deinem Registry-Eintrag dokumentieren: Cron-Jobs, `setInterval`/Loops, Scheduler, MQTT-/File-Watcher, Anomalie-Detektoren, Polling — egal ob es sich selbst beschäftigt oder **andere Agenten triggert/weckt**. Grund: der Operator will in der Webapp transparent sehen, welche stehende Last in der Flotte permanent feuert (und unnötige Trigger erkennen/abstellen). Format:
+```bash
+curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type: application/json' \
+  -d '{"agent":"<dein-key>","recurring_tasks":[{"name":"anomaly-detector","schedule":"stündlich","note":"scannt WR, eskaliert DEAD_INVERTER an den Hub","loads_agents":true},{"name":"sample-loop","schedule":"alle 30 s","note":"schreibt SQLite","loads_agents":false}]}'
+```
+`loads_agents:true` setzen, wenn der Trigger andere Agenten anstößt/weckt (Channel-Message, Spawn, peer/notify). Halte es ehrlich + vollständig — neue Trigger sofort nachtragen, abgeschaltete entfernen.
 
 **♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Wenn dein Context-Monitor-Hook **CRITICAL (≥75%)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
 ```bash
