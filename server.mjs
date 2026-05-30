@@ -12,6 +12,7 @@ import { spawn, execSync } from "node:child_process";
 import crypto from "node:crypto";
 import { complete as llmComplete, completeStream as llmCompleteStream, listModels as llmListModels, getCacheStats as llmGetCacheStats, clearCache as llmClearCache, getCircuitStats as llmGetCircuitStats, forceCloseCircuit as llmForceCloseCircuit, forceOpenCircuit as llmForceOpenCircuit, setAuditSink as llmSetAuditSink } from "./lib/llm-gateway.mjs";
 import { listTemplates as llmListTemplates } from "./lib/llm-templates.mjs";
+import { checkForUpdate, startApply, readState as readUpdateState, getSelfInfo } from "./lib/updater.mjs";
 
 // === LLM live-usage tracking (in-memory, for sidebar dots) ===
 // Rolling 24h window. Updated on every /api/llm/complete call. Pruned on read.
@@ -2153,7 +2154,7 @@ async function fetchHealth(registry, force = false) {
       }
     })
   );
-  const data = { checks: Object.fromEntries(checks), generated_at: new Date().toISOString() };
+  const data = { checks: Object.fromEntries(checks), self: await getSelfInfo(), generated_at: new Date().toISOString() };
   healthCache = { data, fetched_at: now };
   return { ...data, cached: false, age_ms: 0 };
 }
@@ -2269,7 +2270,10 @@ async function handleApi(req, res, url) {
           query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
         { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
         { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
-        { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached" },
+        { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached (+ self: version/commit)" },
+        { method: "GET",  path: "/api/update/check",     purpose: "self-update: latest GitHub release vs running commit (10 min cached; ?refresh=1)" },
+        { method: "GET",  path: "/api/update/status",    purpose: "self-update: progress of an in-flight apply (poll)" },
+        { method: "POST", path: "/api/update/apply",     purpose: "self-update: apply a release in-place + restart. body: { tag? } — defaults to latest. Manual-only." },
         { method: "GET",  path: "/api/usage",            purpose: "ccusage cost overlay (5 min cached)" },
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
@@ -2663,6 +2667,29 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
     const registry = await readRegistry();
     return send(200, await fetchHealth(registry, url.searchParams.get("refresh") === "1"));
+  }
+
+  // ── Self-update (manual-only, release-gated) ───────────────────────────────
+  if (req.method === "GET" && url.pathname === "/api/update/check") {
+    return send(200, await checkForUpdate(url.searchParams.get("refresh") === "1"));
+  }
+  if (req.method === "GET" && url.pathname === "/api/update/status") {
+    const st = await readUpdateState();
+    return send(200, { self: await getSelfInfo(), state: st });
+  }
+  if (req.method === "POST" && url.pathname === "/api/update/apply") {
+    const body = (await readBody()) || {};
+    // Re-check so we never apply when nothing is actually available.
+    const chk = await checkForUpdate(true);
+    if (!chk.ok) return send(502, { started: false, reason: "check_failed", error: chk.error });
+    const tag = body.tag || chk.latest?.tag;
+    if (!tag) return send(400, { started: false, reason: "no_target_tag" });
+    if (!body.tag && !chk.update_available) {
+      return send(409, { started: false, reason: "no_update_available", current: chk.current, latest: chk.latest });
+    }
+    const result = await startApply({ tag });
+    auditEvent("hub_update_apply", { target: "agent-master" }, { tag, ...result });
+    return send(result.started ? 202 : 409, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/events") {

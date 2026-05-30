@@ -1377,6 +1377,7 @@
 <body>
 <header>
   <h1 style="line-height:1.1">🛰 agent-master<span id="hub-name" style="display:block;font-size:11px;color:var(--text-dim);font-weight:400;margin-top:2px"></span></h1>
+  <a id="update-badge" href="#" title="Hub-Update verfügbar" style="display:none;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;background:#1f3a1f;border:1px solid #2e6b2e;color:#7fdc7f;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap"></a>
   <div class="view-toggle">
     <button class="view-btn active" id="view-agents"   onclick="switchView('agents')">🛰 Agenten</button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
@@ -3101,6 +3102,63 @@ function connectSse() {
   };
 }
 
+// ── Hub self-update (manual-only, release-gated) ───────────────────────────
+async function checkHubUpdate() {
+  const badge = document.getElementById("update-badge");
+  if (!badge) return;
+  try {
+    const c = await (await fetch("/api/update/check")).json();
+    if (c.ok && c.update_available && c.latest?.tag) {
+      badge.textContent = `⬆ Hub-Update ${c.latest.tag}`;
+      badge.style.display = "inline-flex";
+      badge.onclick = (e) => { e.preventDefault(); startHubUpdate(c); };
+    } else {
+      badge.style.display = "none";
+    }
+  } catch {}
+}
+
+async function startHubUpdate(c) {
+  const notes = (c.latest.notes || "").trim().slice(0, 800);
+  const ok = confirm(
+    `Hub auf ${c.latest.tag} aktualisieren?\n\n` +
+    `Läuft: ${c.current.version} (${c.current.commit})\nNeu:   ${c.latest.tag}\n\n` +
+    (notes ? notes + "\n\n" : "") +
+    `Der Hub startet dabei kurz neu (Spawn/Routing/Gateway für ~Sekunden weg). ` +
+    `Schlägt der Healthcheck fehl, wird automatisch zurückgerollt.`
+  );
+  if (!ok) return;
+  try {
+    const res = await (await fetch("/api/update/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    })).json();
+    if (!res.started) { alert("Update nicht gestartet: " + (res.reason || "unbekannt")); return; }
+    pollHubUpdateStatus();
+  } catch (e) {
+    alert("Update-Request fehlgeschlagen: " + e.message);
+  }
+}
+
+function pollHubUpdateStatus() {
+  const badge = document.getElementById("update-badge");
+  const terminal = ["success", "rolled_back", "failed", "failed_rollback"];
+  let tries = 0;
+  const tick = async () => {
+    tries++;
+    let st = null;
+    try { st = (await (await fetch("/api/update/status")).json()).state; } catch {}
+    if (badge) {
+      badge.style.display = "inline-flex";
+      if (st?.phase) badge.textContent = terminal.includes(st.phase)
+        ? (st.phase === "success" ? "✓ Update aktiv" : `⚠ ${st.phase}`)
+        : `⟳ ${st.phase}…`;
+    }
+    if (st && terminal.includes(st.phase)) { setTimeout(checkHubUpdate, 8000); return; }
+    if (tries < 80) setTimeout(tick, 3000);   // ~4 min cap (restart-window safe)
+  };
+  tick();
+}
+
 async function init() {
   // Initial fetch so first paint is fast (SSE catches up too)
   try {
@@ -3116,6 +3174,9 @@ async function init() {
   setInterval(refreshHealthInBackground, 5 * 60 * 1000);
   // re-render every minute to refresh the "letzte Aktualisierung" timestamp + sse age
   setInterval(render, 60 * 1000);
+  // Hub self-update: check on load + every 30 min
+  checkHubUpdate();
+  setInterval(checkHubUpdate, 30 * 60 * 1000);
 }
 
 // Pause SSE when tab is hidden — saves usage-refresh churn when user not looking

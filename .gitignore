@@ -7,6 +7,7 @@ data/briefed-peers.json
 data/.influx-token
 data/sources.json
 data/health-state.json
+data/update-state.json
 
 # Local user registry — derived from data/registry.example.json on first install.
 # Each user maintains their own.
