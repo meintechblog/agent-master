@@ -2151,7 +2151,7 @@ function renderTabs() {
       ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
       ${ssPending ? `<span class="tab-softstop" title="Soft-Stop läuft — klick zum Abbrechen" onclick="event.stopPropagation();handleSoftStopCancel('${key}')">💤↩︎</span>` : ""}
-      ${agent.live ? `<span class="tab-focus${agent.waiting ? " waiting" : ""}" title="${agent.waiting ? "wartet auf deine Eingabe — zur Session springen" : "Zur Terminal-Session springen"}" onclick="event.stopPropagation();handleFocus('${key}')">${agent.waiting ? "⏳" : "↗"}</span>` : ""}
+      ${agent.live ? `<span class="tab-focus${agent.waiting ? " waiting" : ""}" title="${agent.waiting ? "fertig — wartet auf deine Eingabe (wie die Terminal-Glocke); zur Session springen" : "Zur Terminal-Session springen"}" onclick="event.stopPropagation();handleFocus('${key}')">${agent.waiting ? "🔔" : "↗"}</span>` : ""}
     `;
     btn.onclick = () => selectAgent(key);
     tabs.appendChild(btn);
@@ -2720,7 +2720,7 @@ async function sendInlineChat() {
 function renderSessionMsg(m) {
   const who = m.role === "assistant" ? "🤖 assistant" : m.role === "user" ? "👤 user" : "• " + m.role;
   const toolTags = (m.tools || []).map((t) => `<span class="session-tool">${escapeHtml(t)}</span>`).join("");
-  const waitTag = m.role === "assistant" && m.stop_reason === "end_turn" ? ` <span class="session-wait">⏳ wartet</span>` : "";
+  const waitTag = m.role === "assistant" && m.stop_reason === "end_turn" ? ` <span class="session-wait">🔔 wartet</span>` : "";
   const txt = m.text ? `<div class="session-text">${escapeHtml(m.text)}</div>` : "";
   return `<div class="session-msg ${m.role}"><div class="session-role">${who}${waitTag}</div>${txt}${toolTags ? `<div class="session-tools">${toolTags}</div>` : ""}</div>`;
 }
@@ -2990,10 +2990,10 @@ function renderMatrix() {
       const role = a.role || (a.deployment && a.deployment.type) || "—";
       const ghUrl = a.repo_url ? a.repo_url.replace(/\s*\(.*\)\s*$/, "").trim() : "";
       const gh = ghUrl ? `<a class="mx-ext" href="${ghUrl}" target="_blank" rel="noopener">GitHub ↗</a>` : `<span class="mx-no">—</span>`;
-      const waitDot = a.waiting ? ` <span title="wartet auf deine Eingabe" style="color:var(--yellow)">⏳</span>` : "";
+      const waitDot = a.waiting ? ` <span title="fertig — wartet auf deine Eingabe (wie die Terminal-Glocke)" style="color:var(--yellow)">🔔</span>` : "";
       const activeDot = a.active ? ` <span title="arbeitet gerade" style="color:var(--accent,#6cf)">⚙</span>` : "";
       const liveCell = a.live
-        ? (a.active ? '<span style="color:var(--accent,#6cf)">⚙ arbeitet</span>' : (a.waiting ? '<span style="color:var(--yellow)">⏳ wartet</span>' : "live · idle"))
+        ? (a.active ? '<span style="color:var(--accent,#6cf)">⚙ arbeitet</span>' : (a.waiting ? '<span style="color:var(--yellow)">🔔 wartet</span>' : "live · idle"))
         : '<span class="mx-no">offline</span>';
       return `<tr>
         <td><span class="mx-dot ${a.live ? "live" : "offline"}"></span><a class="agent-link" onclick="selectAgent('${key}')">${key}</a>${activeDot}${waitDot}</td>
