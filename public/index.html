@@ -2153,7 +2153,7 @@ function renderTabs() {
       ${ssPending ? `<span class="tab-softstop" title="Soft-Stop läuft — klick zum Abbrechen" onclick="event.stopPropagation();handleSoftStopCancel('${key}')">💤↩︎</span>` : ""}
       ${agent.live ? `<span class="tab-focus${agent.waiting ? " waiting" : ""}" title="${agent.waiting ? "fertig — wartet auf deine Eingabe (wie die Terminal-Glocke); zur Session springen" : "Zur Terminal-Session springen"}" onclick="event.stopPropagation();handleFocus('${key}')">${agent.waiting ? "🔔" : "↗"}</span>` : ""}
     `;
-    btn.onclick = () => selectAgent(key);
+    btn.onclick = () => selectAgent(key, { focus: true });
     tabs.appendChild(btn);
   }
   const addBtn = document.createElement("button");
@@ -2826,13 +2826,16 @@ function switchView(v, push = true) {
 }
 
 // Select an agent + deep-link to /<key>.
-function selectAgent(key) {
+function selectAgent(key, opts = {}) {
   active = key;
   markAgentUsed(key);
   try { localStorage.setItem("activeAgent", key); } catch {}
   switchView("agents", false);
   if (location.pathname !== "/" + key) history.pushState({ active: key }, "", "/" + key);
   render();
+  // Sidebar click jumps straight to the agent's Terminal tab (no detour via the
+  // ↗ button). Only for live agents — offline ones have no window to focus.
+  if (opts.focus && state.agents && state.agents[key] && state.agents[key].live) handleFocus(key);
 }
 
 // Apply the current URL → view/agent (on load + back/forward).
