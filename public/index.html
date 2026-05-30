@@ -378,6 +378,11 @@
   .tab-softstop:hover { background: rgba(231,76,60,0.15); }
   @keyframes waitpulse { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
   /* Agent matrix */
+  .board-stats { display: flex; gap: 14px; margin: 6px 0 18px; flex-wrap: wrap; }
+  .board-stat { background: var(--panel, #141414); border: 1px solid var(--border, #222); border-radius: 10px; padding: 10px 18px; min-width: 92px; text-align: center; }
+  .board-stat-n { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .board-stat-k { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }
+  .board-table td.board-txt { white-space: normal; max-width: 360px; color: var(--text-dim); }
   .matrix-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .matrix-table th, .matrix-table td {
     padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border, #222);
@@ -1548,6 +1553,7 @@
     <button class="view-btn active" id="view-agents"   onclick="switchView('agents')">🛰 Agenten</button>
     <button class="view-btn"        id="view-matrix"   onclick="switchView('matrix')">🔲 Matrix</button>
     <button class="view-btn"        id="view-github"   onclick="switchView('github')">📥 GitHub<span id="github-nav-badge" class="nav-badge" style="display:none"></span></button>
+    <button class="view-btn"        id="view-board"    onclick="switchView('board')">📨 Board<span id="board-nav-badge" class="nav-badge" style="display:none"></span></button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
     <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
@@ -1714,6 +1720,20 @@
       <button class="btn btn-secondary" onclick="addWhitelist()">+ Hinzufügen</button>
     </div>
   </div>
+</section>
+
+<section id="board-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">📨 Nachrichten-Board</h2>
+      <div class="section-hint">Jede über WhatsApp/Telegram eingehende Nachricht als Ticket: an welchen Agenten geroutet, Status (offen/beantwortet/stehengeblieben), Retry-Zähler, Antwort-Latenz. Offene Tickets &gt;30min werden automatisch nachgetriggert (2×), dann „stalled" + Heads-up an dich. <span id="board-meta"></span></div>
+    </div>
+    <div class="usage-controls">
+      <button class="btn btn-secondary" onclick="loadBoard(true)">⟳</button>
+    </div>
+  </div>
+  <div id="board-stats" class="board-stats"></div>
+  <div id="board-wrap"><div class="empty-tip">Lade Board…</div></div>
 </section>
 
 <!-- Skill detail modal -->
@@ -2911,13 +2931,14 @@ async function refreshHealthInBackground() {
 
 function switchView(v, push = true) {
   view = v;
-  for (const k of ["agents", "matrix", "github", "skills", "usage", "settings"]) {
+  for (const k of ["agents", "matrix", "github", "board", "skills", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
   document.getElementById("agents-layout").style.display   = v === "agents"   ? "" : "none";
   document.getElementById("matrix-view").style.display     = v === "matrix"   ? "" : "none";
   document.getElementById("github-view").style.display     = v === "github"   ? "" : "none";
+  document.getElementById("board-view").style.display      = v === "board"    ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
@@ -2926,6 +2947,7 @@ function switchView(v, push = true) {
   if (v === "settings") { loadSources(); loadBriefing(); }
   if (v === "matrix") loadMatrix(false);
   if (v === "github") loadGithub();
+  if (v === "board") startBoardPoll(); else stopBoardPoll();
   if (v !== "agents") stopChatPoll();
   if (push) {
     const target = v === "agents" ? (active ? "/" + active : "/") : "/" + v;
@@ -2949,7 +2971,7 @@ function selectAgent(key, opts = {}) {
 // Apply the current URL → view/agent (on load + back/forward).
 function applyRoute() {
   const seg = decodeURIComponent((location.pathname || "/").replace(/^\/+|\/+$/g, ""));
-  if (["matrix", "skills", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
+  if (["matrix", "github", "board", "skills", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
   if (seg && state && state.agents && state.agents[seg]) { active = seg; switchView("agents", false); render(); return; }
   switchView("agents", false);
 }
@@ -3258,6 +3280,71 @@ function fmtTimeAgo(iso) {
   if (diffSec < 86400)     return `vor ${Math.floor(diffSec / 3600)}h`;
   if (diffSec < 86400 * 7) return `vor ${Math.floor(diffSec / 86400)}d`;
   return new Date(iso).toISOString().slice(0, 10);
+}
+
+// ── 📨 Nachrichten-Board (Tickets vom chat-gateway via Hub-Proxy) ────────────
+let boardPollTimer = null;
+let _boardData = null;
+function stopBoardPoll() { if (boardPollTimer) { clearInterval(boardPollTimer); boardPollTimer = null; } }
+function startBoardPoll() {
+  stopBoardPoll();
+  loadBoard(false);
+  boardPollTimer = setInterval(() => loadBoard(false), 5000);
+}
+async function loadBoard(force) {
+  const wrap = document.getElementById("board-wrap");
+  if (!wrap) { stopBoardPoll(); return; }
+  if (force) wrap.innerHTML = `<div class="empty-tip">Lade Board…</div>`;
+  try {
+    const d = await (await fetch("/api/board/tickets?limit=200")).json();
+    _boardData = d;
+    renderBoard(d);
+  } catch (e) {
+    wrap.innerHTML = `<div class="empty-tip">Board nicht erreichbar: ${escapeHtml(String(e.message))}</div>`;
+  }
+}
+function boardStatusBadge(s) {
+  const map = { open: ["offen", "var(--yellow)"], answered: ["beantwortet", "var(--green)"], stalled: ["stehengeblieben", "var(--red)"] };
+  const [label, color] = map[s] || [s || "?", "var(--text-dim)"];
+  return `<span class="status-pill" style="background:transparent;border:1px solid ${color};color:${color}">${label}</span>`;
+}
+function renderBoard(d) {
+  const wrap = document.getElementById("board-wrap");
+  const statsEl = document.getElementById("board-stats");
+  const metaEl = document.getElementById("board-meta");
+  if (!wrap) return;
+  if (!d || d.available === false) {
+    if (statsEl) statsEl.innerHTML = "";
+    wrap.innerHTML = `<div class="empty-tip">Board-Gateway (localhost:7891) nicht erreichbar${d && d.error ? ` — ${escapeHtml(String(d.error))}` : ""}. Läuft der chat-gateway?</div>`;
+    return;
+  }
+  const st = d.stats || {};
+  if (statsEl) statsEl.innerHTML = [
+    ["gesamt", st.total, "var(--text)"], ["offen", st.open, "var(--yellow)"],
+    ["beantwortet", st.answered, "var(--green)"], ["stehengeblieben", st.stalled, "var(--red)"],
+  ].map(([k, v, c]) => `<div class="board-stat"><div class="board-stat-n" style="color:${c}">${v ?? 0}</div><div class="board-stat-k">${k}</div></div>`).join("");
+  const tickets = (d.tickets || []).slice().sort((a, b) => new Date(b.last_activity_at || b.created_at || 0) - new Date(a.last_activity_at || a.created_at || 0));
+  if (metaEl) metaEl.textContent = `${tickets.length} Tickets · aktualisiert ${fmtTime()}`;
+  if (!tickets.length) { wrap.innerHTML = `<div class="empty-tip">Noch keine Tickets — kommt rein, sobald Nachrichten über WhatsApp/Telegram laufen.</div>`; return; }
+  const chan = (c) => c === "telegram" ? "📨 TG" : c === "whatsapp" ? "📱 WA" : (c || "?");
+  const rows = tickets.map((t) => {
+    const target = `${escapeHtml(t.target_repo || "?")}${t.target_kind ? ` <span style="color:var(--text-dim)">(${escapeHtml(t.target_kind)})</span>` : ""}`;
+    const lat = t.latency_ms != null ? `${Math.round(t.latency_ms / 1000)}s` : (t.status === "answered" ? "?" : "—");
+    const retries = t.retries ? `<span style="color:var(--yellow)">${t.retries}×</span>` : "0";
+    const txt = escapeHtml((t.text || "").replace(/\s+/g, " ").slice(0, 90));
+    return `<tr>
+      <td title="${escapeHtml(t.created_at || "")}">${fmtTimeAgo(t.last_activity_at || t.created_at)}</td>
+      <td>${chan(t.channel)}</td>
+      <td>${target}</td>
+      <td class="board-txt">${txt}</td>
+      <td>${boardStatusBadge(t.status)}</td>
+      <td style="text-align:center">${retries}</td>
+      <td style="text-align:right">${lat}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="matrix-table board-table"><thead><tr>
+    <th>Aktivität</th><th>Kanal</th><th>Ziel-Agent</th><th>Nachricht</th><th>Status</th><th>Retries</th><th>Latenz</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderActivity() {

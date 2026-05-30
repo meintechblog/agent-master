@@ -3346,6 +3346,26 @@ async function handleApi(req, res, url) {
   }
 
   // ── GitHub issue/PR tracker ────────────────────────────────────────────────
+  // Proxy to the chat-gateway's message-board API (localhost:7891). Server-side
+  // so the dashboard's "📨 Board" tab works from any device (a phone hitting
+  // :7890 can't reach the Mac's localhost:7891 directly). Returns { available:
+  // false } when the gateway board isn't up, so the tab degrades gracefully.
+  if (req.method === "GET" && url.pathname === "/api/board/tickets") {
+    const qs = url.searchParams.toString();
+    const target = `http://localhost:7891/api/tickets${qs ? `?${qs}` : ""}`;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 3000);
+      const r = await fetch(target, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!r.ok) return send(200, { available: false, error: `board_http_${r.status}` });
+      const data = await r.json();
+      return send(200, { available: true, ...data });
+    } catch (e) {
+      return send(200, { available: false, error: String(e.message) });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/github/items") {
     return send(200, await readGithubState());
   }
