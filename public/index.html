@@ -2016,9 +2016,37 @@ document.addEventListener("click", (e) => {
   btn.innerHTML = "▼ Details";
 });
 
+// Track when *I* last used an agent (selected / opened session / chatted / jumped).
+// Per-device (localStorage). Used to order the mobile strip: most-recently-used left.
+function getLastUsedMap() {
+  try { return JSON.parse(localStorage.getItem("agentLastUsed") || "{}"); } catch { return {}; }
+}
+function markAgentUsed(key) {
+  try {
+    const u = getLastUsedMap();
+    u[key] = Date.now();
+    localStorage.setItem("agentLastUsed", JSON.stringify(u));
+  } catch {}
+  if (window.matchMedia("(max-width: 640px)").matches && state && state.agents) renderTabs();
+}
+
 function renderTabs() {
   const tabs = document.getElementById("tabs");
-  const entries = Object.entries(state.agents).sort((a, b) => a[0].localeCompare(b[0]));
+  const isMobile = window.matchMedia("(max-width: 640px)").matches;
+  const entries = Object.entries(state.agents);
+  if (isMobile) {
+    // Mobile strip: most-recently-used-by-me first (newest left). Use my local
+    // interaction timestamp, fall back to the agent's last activity, then name.
+    const used = getLastUsedMap();
+    entries.sort((a, b) => {
+      const ra = used[a[0]] || a[1].last_activity_at || 0;
+      const rb = used[b[0]] || b[1].last_activity_at || 0;
+      if (ra !== rb) return rb - ra;
+      return a[0].localeCompare(b[0]);
+    });
+  } else {
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+  }
   tabs.innerHTML = "";
   for (const [key, agent] of entries) {
     const btn = document.createElement("button");
@@ -2547,6 +2575,7 @@ function formatIdle(ms) {
 // Read-only "terminal in the browser": live transcript of an agent's session.
 let sessionPoll = null;
 function openSessionView(key) {
+  markAgentUsed(key);
   closeSessionView();
   const ov = document.createElement("div");
   ov.id = "session-overlay";
@@ -2593,6 +2622,7 @@ async function sendSessionChat(key) {
   if (!inp) return;
   const text = inp.value.trim();
   if (!text) return;
+  markAgentUsed(key);
   inp.value = ""; inp.disabled = true;
   try {
     const res = await (await fetch("/api/agent-chat", {
@@ -2613,6 +2643,7 @@ function renderSessionMsg(m) {
 
 // Bring the agent's Terminal window to the front (the "↗ Terminal" affordance).
 async function handleFocus(key) {
+  markAgentUsed(key);
   try {
     const res = await (await fetch("/api/focus", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent: key }),
@@ -2709,6 +2740,7 @@ function switchView(v, push = true) {
 // Select an agent + deep-link to /<key>.
 function selectAgent(key) {
   active = key;
+  markAgentUsed(key);
   switchView("agents", false);
   if (location.pathname !== "/" + key) history.pushState({ active: key }, "", "/" + key);
   render();
@@ -2722,6 +2754,12 @@ function applyRoute() {
   switchView("agents", false);
 }
 window.addEventListener("popstate", applyRoute);
+// Re-sort the agent strip when crossing the mobile breakpoint / rotating.
+let _resizeTabsT;
+window.addEventListener("resize", () => {
+  clearTimeout(_resizeTabsT);
+  _resizeTabsT = setTimeout(() => { if (state && state.agents) renderTabs(); }, 200);
+});
 
 let matrixUpdaters = null;
 async function loadMatrix(force) {
