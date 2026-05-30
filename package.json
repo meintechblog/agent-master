@@ -1,6 +1,6 @@
 {
   "name": "agent-master",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Web dashboard + HTTP-API for orchestrating claude-peers-mcp sessions across multiple repos. Tab per agent, spawn/stop from browser, live status via SSE, Claude Code plan-usage + ccusage cost display.",
   "type": "module",
   "main": "server.mjs",
