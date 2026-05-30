@@ -33,3 +33,4 @@ launchd/*.local.plist
 .backups/
 *.jpeg
 data/.wa-phone
+data/github-tracker.json

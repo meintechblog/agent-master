@@ -1508,6 +1508,138 @@ async function startRegistryFillLoop() {
   setTimeout(registryFillTick, 30_000); // first nudge ~30 s after boot
 }
 
+// === GitHub issue/PR tracker ===
+// Hourly scans every registry repo (with repo_url) for OPEN issues + PRs. New ones
+// from a whitelisted author are delivered straight to the owning agent ("evaluate +
+// implement if sensible"); from anyone else they go to Jörg as a short Telegram
+// triage. Status lifecycle per item: awaiting_triage | delivered | in_progress |
+// done | cancelled | closed_on_github. State in data/github-tracker.json (gitignored).
+const GITHUB_TRACKER_PATH = path.join(__dirname, "data", "github-tracker.json");
+const GITHUB_SCAN_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const GITHUB_OPEN_STATUSES = ["awaiting_triage", "delivered", "in_progress"]; // = "still needs attention"
+const GITHUB_TERMINAL_STATUSES = ["done", "cancelled", "closed_on_github"];
+
+function runGh(args, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("gh", args, { timeout: timeoutMs });
+    let out = "", err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error((err || `gh exit ${code}`).slice(0, 200)))));
+    child.on("error", reject);
+  });
+}
+async function readGithubState() {
+  try { return JSON.parse(await fs.readFile(GITHUB_TRACKER_PATH, "utf8")); }
+  catch { return { whitelist: ["meintechblog"], items: {}, last_scan: null }; }
+}
+async function writeGithubState(s) {
+  await fs.writeFile(GITHUB_TRACKER_PATH, JSON.stringify(s, null, 2));
+}
+function parseOwnerRepo(repoUrl) {
+  if (!repoUrl) return null;
+  const cleaned = String(repoUrl).replace(/\s*\(.*\)\s*$/, "").trim().replace(/\.git$/, "");
+  const m = cleaned.match(/github\.com[/:]([^/\s]+\/[^/\s]+)$/);
+  return m ? m[1] : null;
+}
+async function pushOperatorTelegram(text) {
+  const reg = await readRegistry();
+  const chatId = reg._meta && reg._meta.operator_tg;
+  if (!chatId) { console.warn("[github] no _meta.operator_tg set — cannot Telegram-notify"); return false; }
+  const outboxDir = path.join(process.env.HOME, "codex", "chat-llm-master", "gateway", "data", "outbox");
+  try {
+    await fs.mkdir(outboxDir, { recursive: true });
+    await fs.writeFile(path.join(outboxDir, `${crypto.randomUUID()}.json`),
+      JSON.stringify({ sender_repo: "agent-master", msg_type: "tg_reply", chat_id: chatId, text }));
+    return true;
+  } catch (e) { console.warn("[github] telegram push failed:", e.message); return false; }
+}
+function githubItemMessage(item) {
+  return [
+    `📥 Neuer GitHub-${item.type === "pr" ? "PR" : "Issue"} #${item.number} in ${item.owner_repo} von vertrauenswürdiger Quelle @${item.author}:`,
+    `"${item.title}"`,
+    item.url,
+    ``,
+    `Bitte anschauen + bewerten, ob sinnvoll. Wenn ja → direkt umsetzen (commit/push). Danach Status im Hub setzen:`,
+    `  curl -s -X POST http://localhost:7890/api/github/item-status -H 'Content-Type: application/json' -d '{"id":"${item.id}","status":"done"}'`,
+    `(status: in_progress | done | cancelled)`,
+  ].join("\n");
+}
+async function deliverGithubItemToAgent(item, peers) {
+  const peer = peers.find((p) => p.cwd === item.repo_path);
+  if (peer) { await sendChannelMessage(peer.id, githubItemMessage(item)); return "channel"; }
+  try {
+    const inbox = path.join(item.repo_path, ".planning", "inbox");
+    await fs.mkdir(inbox, { recursive: true });
+    await fs.writeFile(path.join(inbox, `from-github-scanner-${item.type}-${item.number}.md`),
+      `# GitHub ${item.type} #${item.number} (von @${item.author}, vertrauenswürdig)\n\n${item.url}\n\n## ${item.title}\n\n${githubItemMessage(item)}\n`);
+    return "inbox";
+  } catch { return "failed"; }
+}
+async function githubScanTick() {
+  const [registry, peers, state] = await Promise.all([readRegistry(), fetchPeers(), readGithubState()]);
+  state.items = state.items || {};
+  if (!Array.isArray(state.whitelist)) state.whitelist = ["meintechblog"];
+  const wl = new Set(state.whitelist.map((s) => String(s).toLowerCase()));
+  const seenNow = new Set();
+  const scannedRepos = new Set(); // dedup: multiple agents can share one repo_url (e.g. aliases)
+  let newCount = 0, delivered = 0, triaged = 0;
+  for (const [key, agent] of Object.entries(registry.agents)) {
+    if (agent.deployment?.type === "alias" || agent.alias_for) continue;
+    const ownerRepo = parseOwnerRepo(agent.repo_url);
+    if (!ownerRepo) continue;
+    if (scannedRepos.has(ownerRepo)) continue; // first agent owning this repo wins
+    scannedRepos.add(ownerRepo);
+    for (const type of ["issue", "pr"]) {
+      let rows = [];
+      try {
+        const out = await runGh([type, "list", "--repo", ownerRepo, "--state", "open", "--json", "number,title,author,createdAt,url", "--limit", "50"]);
+        rows = JSON.parse(out || "[]");
+      } catch { continue; } // private/no-access/no-issues-enabled → skip this repo+type
+      for (const r of rows) {
+        const id = `${key}:${type}#${r.number}`;
+        seenNow.add(id);
+        if (state.items[id]) { state.items[id].title = r.title; continue; }
+        const author = (r.author && r.author.login) || "unknown";
+        const trusted = wl.has(author.toLowerCase());
+        const now = new Date().toISOString();
+        const item = {
+          id, repo_key: key, repo_path: agent.repo, owner_repo: ownerRepo,
+          type, number: r.number, title: r.title, author, url: r.url,
+          created_at: r.createdAt, trusted,
+          status: trusted ? "delivered" : "awaiting_triage",
+          first_seen: now, updated_at: now,
+        };
+        state.items[id] = item;
+        newCount++;
+        if (trusted) {
+          item.delivery = await deliverGithubItemToAgent(item, peers);
+          delivered++;
+          auditEvent("github.item.delivered", { target: key }, `Trusted ${type} #${r.number} (@${author}) → ${key} via ${item.delivery}`).catch(() => {});
+        } else {
+          await pushOperatorTelegram(`📥 Neuer GitHub-${type === "pr" ? "PR" : "Issue"} #${r.number} in ${ownerRepo} von @${author} (nicht-whitelisted):\n"${r.title}"\n${r.url}\n→ Im Hub-UI (📥 GitHub) durchreichen oder verwerfen.`);
+          triaged++;
+          auditEvent("github.item.triage", { target: key }, `Untrusted ${type} #${r.number} in ${ownerRepo} by @${author} → Telegram`).catch(() => {});
+        }
+      }
+    }
+  }
+  // Auto-resolve items that dropped off the open lists (closed/merged on GitHub).
+  for (const it of Object.values(state.items)) {
+    if (!seenNow.has(it.id) && !GITHUB_TERMINAL_STATUSES.includes(it.status)) {
+      it.status = "closed_on_github";
+      it.updated_at = new Date().toISOString();
+    }
+  }
+  state.last_scan = new Date().toISOString();
+  await writeGithubState(state);
+  return { ok: true, new: newCount, delivered, triaged, total: Object.keys(state.items).length, scanned_at: state.last_scan };
+}
+async function startGithubScanLoop() {
+  setInterval(() => githubScanTick().catch((e) => console.warn("[github] scan failed:", e.message)), GITHUB_SCAN_INTERVAL_MS);
+  setTimeout(() => githubScanTick().catch(() => {}), 45_000); // first scan ~45 s after boot
+}
+
 async function createAgent({ name: rawName, mission: rawMission }) {
   const name = validateAgentName(rawName);
   const mission = String(rawMission || "").trim();
@@ -2668,6 +2800,12 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/update/status",    purpose: "self-update: progress of an in-flight apply (poll)" },
         { method: "POST", path: "/api/update/apply",     purpose: "self-update: apply a release in-place + restart. body: { tag? } — defaults to latest. Manual-only." },
         { method: "GET",  path: "/api/agent-updaters",   purpose: "per-agent 'has the self-updater integrated' map (probes <web>/api/update/check; 5 min cached). Powers the Matrix tab." },
+        { method: "GET",  path: "/api/github/items",      purpose: "GitHub issue/PR tracker state: { whitelist, items{}, last_scan }. Powers the 📥 GitHub tab + per-agent badges." },
+        { method: "POST", path: "/api/github/scan",       purpose: "force an immediate scan of all repo_url repos for open issues/PRs (else hourly)." },
+        { method: "POST", path: "/api/github/item-status",purpose: "set an item's status. body: { id, status: awaiting_triage|delivered|in_progress|done|cancelled|closed_on_github, by? }. Agents call this after handling a delivered item." },
+        { method: "POST", path: "/api/github/deliver",    purpose: "triage: push an awaiting_triage item to its agent (operator approved). body: { id }." },
+        { method: "GET",  path: "/api/github/whitelist",  purpose: "trusted GitHub usernames (their issues/PRs go straight to the agent)." },
+        { method: "POST", path: "/api/github/whitelist",  purpose: "edit whitelist. body: { add?: '<user>', remove?: '<user>' }." },
         { method: "GET",  path: "/api/usage",            purpose: "ccusage cost overlay (5 min cached)" },
         { method: "GET",  path: "/api/plan-usage",       purpose: "Claude Code plan % (5 min cached)" },
         { method: "GET",  path: "/api/events",           purpose: "SSE stream: status (3 s), usage + plan_usage (5 min)" },
@@ -3104,6 +3242,58 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/agent-updaters") {
     const registry = await readRegistry();
     return send(200, { updaters: await probeAutoUpdate(registry, url.searchParams.get("refresh") === "1"), generated_at: new Date().toISOString() });
+  }
+
+  // ── GitHub issue/PR tracker ────────────────────────────────────────────────
+  if (req.method === "GET" && url.pathname === "/api/github/items") {
+    return send(200, await readGithubState());
+  }
+  if (req.method === "POST" && url.pathname === "/api/github/scan") {
+    try { return send(200, await githubScanTick()); }
+    catch (e) { return send(500, { error: "scan_failed", reason: String(e.message) }); }
+  }
+  if (req.method === "POST" && url.pathname === "/api/github/item-status") {
+    const body = (await readBody()) || {};
+    const valid = ["awaiting_triage", "delivered", "in_progress", "done", "cancelled", "closed_on_github"];
+    if (!body.id || !valid.includes(body.status)) return send(400, { error: "bad_request", valid_status: valid });
+    const state = await readGithubState();
+    const item = state.items?.[body.id];
+    if (!item) return send(404, { error: "unknown_item" });
+    item.status = body.status;
+    item.updated_at = new Date().toISOString();
+    if (body.by) item.last_actor = String(body.by).slice(0, 40);
+    await writeGithubState(state);
+    auditEvent("github.item.status", { target: item.repo_key }, `${item.id} → ${body.status}${body.by ? ` by ${body.by}` : ""}`).catch(() => {});
+    return send(200, { ok: true, item });
+  }
+  if (req.method === "POST" && url.pathname === "/api/github/deliver") {
+    // Triage action: push an awaiting_triage item to its agent (Jörg approved it).
+    const body = (await readBody()) || {};
+    const state = await readGithubState();
+    const item = state.items?.[body.id];
+    if (!item) return send(404, { error: "unknown_item" });
+    const peers = await fetchPeers();
+    item.delivery = await deliverGithubItemToAgent(item, peers);
+    item.status = "delivered";
+    item.updated_at = new Date().toISOString();
+    await writeGithubState(state);
+    auditEvent("github.item.delivered", { target: item.repo_key }, `Manually delivered ${item.id} via ${item.delivery}`).catch(() => {});
+    return send(200, { ok: true, item });
+  }
+  if (req.method === "GET" && url.pathname === "/api/github/whitelist") {
+    const state = await readGithubState();
+    return send(200, { whitelist: state.whitelist || [] });
+  }
+  if (req.method === "POST" && url.pathname === "/api/github/whitelist") {
+    const body = (await readBody()) || {};
+    const state = await readGithubState();
+    let wl = Array.isArray(state.whitelist) ? state.whitelist : ["meintechblog"];
+    if (body.add) { const u = String(body.add).trim().replace(/^@/, ""); if (u && !wl.includes(u)) wl.push(u); }
+    if (body.remove) wl = wl.filter((x) => x.toLowerCase() !== String(body.remove).trim().replace(/^@/, "").toLowerCase());
+    state.whitelist = wl;
+    await writeGithubState(state);
+    auditEvent("github.whitelist", { target: "agent-master" }, `Whitelist: ${wl.join(", ")}`).catch(() => {});
+    return send(200, { ok: true, whitelist: wl });
   }
 
   if (req.method === "GET" && url.pathname === "/api/usage") {
@@ -3737,6 +3927,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[agent-master] registry: ${REGISTRY_PATH}`);
   startBriefingLoop().catch((e) => console.warn("[briefing] start failed:", e.message));
   startRegistryFillLoop().catch((e) => console.warn("[registry-fill] start failed:", e.message));
+  startGithubScanLoop().catch((e) => console.warn("[github-scan] start failed:", e.message));
   startSkillUsageLoop().catch((e) => console.warn("[skill-usage] start failed:", e.message));
   startHealthMonitorLoop().catch((e) => console.warn("[health] start failed:", e.message));
   startExternalDiscoveryLoop().catch((e) => console.warn("[discovery] start failed:", e.message));
