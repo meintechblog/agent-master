@@ -2041,6 +2041,37 @@ async function stopAgent(repoKey, registry) {
 // dashboard). Each spawned agent gets its own window, so the spawn-captured
 // window id uniquely identifies the tab. Fallback: tty-match for sessions a user
 // started manually (not via /api/spawn).
+// `ps -o tty=,ppid=` for one pid → "ttys003 12345" (or "" on error).
+function psTtyPpid(pid) {
+  return new Promise((resolve) => {
+    const c = spawn("ps", ["-o", "tty=,ppid=", "-p", String(pid)]);
+    let s = "";
+    c.stdout.on("data", (d) => (s += d));
+    c.on("close", () => resolve(s.trim()));
+    c.on("error", () => resolve(""));
+  });
+}
+// The claudepeers expect-wrapper hands claude an INNER pty, so peer.tty is not
+// the Terminal tab's tty. Walk the process ancestry to collect the OUTER ttys
+// (the login shell shares the tab's tty), so a manually-started session — e.g.
+// the hub's own, which has no spawn-captured window id — is still locatable.
+async function ancestorTtys(pid) {
+  const out = [];
+  let cur = parseInt(pid, 10);
+  for (let i = 0; i < 12 && cur > 1; i++) {
+    const line = await psTtyPpid(cur);
+    const m = line.match(/^(\S+)\s+(\d+)/);
+    if (!m) break;
+    const tty = m[1];
+    if (/^ttys?\d+$/.test(tty)) {
+      const full = `/dev/${tty}`;
+      if (!out.includes(full)) out.push(full);
+    }
+    cur = parseInt(m[2], 10);
+  }
+  return out;
+}
+
 async function focusAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
   if (!agent) throw new Error(`unknown agent: ${repoKey}`);
@@ -2101,10 +2132,17 @@ async function focusAgent(repoKey, registry) {
     }
   }
 
-  // Fallback B: locate the window by the peer's tty.
-  const ttyRaw = peer.tty || "";
-  const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
-  if (ttyFull) {
+  // Fallback B: locate the window by tty. peer.tty is the inner expect pty, so
+  // try it AND the outer ttys from the process ancestry (= the Terminal tab's
+  // own tty) — that's what makes a manually-started session like the hub's own
+  // findable. First hit self-heals the spawnedWindows map for the fast path.
+  const norm = (t) => (t ? (t.startsWith("/dev/") ? t : `/dev/${t}`) : "");
+  const candidates = [];
+  if (peer.tty) candidates.push(norm(peer.tty));
+  if (peer.pid) {
+    for (const t of await ancestorTtys(peer.pid)) if (!candidates.includes(t)) candidates.push(t);
+  }
+  for (const ttyFull of candidates) {
     let findRaw = "";
     try {
       findRaw = await runOsa(`
