@@ -1446,6 +1446,12 @@
     font-size: 10px; padding: 1px 6px; border-radius: 4px;
     background: rgba(108,170,255,0.12); color: var(--accent, #6cf);
   }
+  .session-foot { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border, #333); }
+  .session-input {
+    flex: 1; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border, #333);
+    background: var(--bg, #0a0a0a); color: var(--text, #ddd); font-size: 13px;
+  }
+  .session-input:focus { outline: none; border-color: var(--accent, #6cf); }
 
   /* Phone / portrait: make the dashboard usable on a narrow screen. */
   @media (max-width: 640px) {
@@ -2543,8 +2549,14 @@ function openSessionView(key) {
         <button class="btn btn-secondary" onclick="closeSessionView()">✕</button>
       </div>
       <div class="session-body" id="session-body"><div class="empty-tip">Lade…</div></div>
+      <div class="session-foot">
+        <input id="session-input" class="session-input" placeholder="Nachricht an ${key}… (Enter sendet)"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();sendSessionChat('${key}')}">
+        <button class="btn btn-primary" onclick="sendSessionChat('${key}')">Senden</button>
+      </div>
     </div>`;
   document.body.appendChild(ov);
+  setTimeout(() => { const i = document.getElementById("session-input"); if (i) i.focus(); }, 100);
   const load = async () => {
     try {
       const d = await (await fetch(`/api/agent-transcript?agent=${encodeURIComponent(key)}&limit=60`)).json();
@@ -2563,6 +2575,21 @@ function closeSessionView() {
   if (sessionPoll) { clearInterval(sessionPoll); sessionPoll = null; }
   const ov = document.getElementById("session-overlay");
   if (ov) ov.remove();
+}
+async function sendSessionChat(key) {
+  const inp = document.getElementById("session-input");
+  if (!inp) return;
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = ""; inp.disabled = true;
+  try {
+    const res = await (await fetch("/api/agent-chat", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent: key, text }),
+    })).json();
+    if (!res.ok) alert("Senden fehlgeschlagen: " + (res.error === "agent_offline" ? `${key} ist offline` : (res.error || "unbekannt")));
+  } catch (e) { alert("Fehler: " + e.message); }
+  inp.disabled = false; inp.focus();
+  // the 4s transcript poll surfaces the agent's reply
 }
 function renderSessionMsg(m) {
   const who = m.role === "assistant" ? "🤖 assistant" : m.role === "user" ? "👤 user" : "• " + m.role;

@@ -3027,6 +3027,29 @@ async function handleApi(req, res, url) {
     return send(200, { ok: true, agent: key, applied });
   }
 
+  // Live-chat: send a message from the dashboard straight into an agent's session
+  // via the claude-peers broker. The reply shows up in the transcript poll.
+  if (req.method === "POST" && url.pathname === "/api/agent-chat") {
+    const body = (await readBody()) || {};
+    const key = body.agent;
+    const text = (body.text || "").trim();
+    if (!key) return send(400, { error: "missing_agent" });
+    if (!text) return send(400, { error: "empty_text" });
+    const registry = await readRegistry();
+    const agent = registry.agents[key];
+    if (!agent) return send(404, { error: "unknown_agent" });
+    const peers = await fetchPeers();
+    const peer = peers.find((p) => p.cwd === agent.repo);
+    if (!peer) return send(409, { error: "agent_offline", agent: key });
+    try {
+      await sendChannelMessage(peer.id, `💬 [Jörg via Dashboard-Chat]: ${text}`);
+      auditEvent("agent.chat", { target: key }, `Dashboard-Chat → ${key}: ${text.slice(0, 80)}`).catch(() => {});
+      return send(200, { ok: true, agent: key, peer_id: peer.id });
+    } catch (e) {
+      return send(500, { error: "send_failed", reason: String(e.message) });
+    }
+  }
+
   // Read-only "terminal in the browser": the recent transcript of an agent's session.
   if (req.method === "GET" && url.pathname === "/api/agent-transcript") {
     const key = url.searchParams.get("agent");
