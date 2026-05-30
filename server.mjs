@@ -480,6 +480,20 @@ async function getHubName() {
   try { return hubNameFrom(await readRegistry()); } catch { return "agent-master"; }
 }
 
+// A "service-in-hub" entry (e.g. sonnet-master = the LLM-Gateway) is not an
+// independent Claude session — it runs INSIDE another agent's process and shares
+// that agent's cwd. It must not be counted as a live/active agent and is shown
+// nested under its host in the UI, not as a standalone peer.
+const isServiceInHub = (agent) => agent?.deployment?.type === "service-in-hub";
+// Host = the non-service agent sharing the service's repo dir (the process it
+// lives in). Falls back to null if none found.
+function findServiceHostKey(registry, serviceAgent) {
+  for (const [k, a] of Object.entries(registry.agents || {})) {
+    if (a !== serviceAgent && a.repo === serviceAgent.repo && !isServiceInHub(a)) return k;
+  }
+  return null;
+}
+
 // === New-peer briefing ===
 //
 // Background loop: every BRIEFING_POLL_MS, fetch the peer list and send a
@@ -2714,6 +2728,59 @@ async function getAgentActivity(cwd) {
   return val;
 }
 
+// Shared status payload for the dashboard, used by both the SSE broadcast and
+// GET /api/status. Builds the per-agent map plus the headline counts. Service-
+// in-hub entries (e.g. the LLM-Gateway) are tagged is_service + nested under
+// their host and are excluded from the live/active/total agent counts.
+async function buildStatusPayload(registry, peers) {
+  const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
+  const agents = {};
+  let activeCount = 0;
+  let totalCount = 0;
+  for (const [key, agent] of Object.entries(registry.agents)) {
+    const service = isServiceInHub(agent);
+    const live = resolveLive(agent, registry, liveByCwd);
+    const act = live ? await getAgentActivity(live.cwd) : null;
+    const active = !service && isAgentActive(live, act);
+    if (service) {
+      agents[key] = {
+        ...agent, key,
+        is_service: true,
+        service_host: findServiceHostKey(registry, agent),
+        service_running: !!live,   // the host process is up → the service is up
+        live: false,               // not an independent session
+        active: false,
+        peer_id: null, last_seen: null, live_summary: null, pid: null, tty: null,
+        last_activity_at: null, waiting: false,
+      };
+      continue; // not counted toward live/active/total agent tallies
+    }
+    totalCount++;
+    if (active) activeCount++;
+    agents[key] = {
+      ...agent, key,
+      live: !!live,
+      peer_id: live?.id || null,
+      last_seen: live?.last_seen || null,
+      live_summary: live?.summary || null,
+      pid: live?.pid || null,
+      tty: live?.tty || null,
+      last_activity_at: act?.last_activity_at ?? null,
+      waiting: act?.waiting ?? false,
+      active,
+    };
+  }
+  return {
+    agents,
+    online_count: peers.length,
+    active_count: activeCount,
+    total_count: totalCount,
+    meta: registry._meta || null,
+    soft_stops: Object.fromEntries(softStopState),
+    updated_at: new Date().toISOString(),
+  };
+}
+
 // Recent transcript of an agent's session, simplified for the read-only browser
 // "terminal" view. Returns the last `limit` message-bearing entries.
 function summarizeTranscriptEntry(e) {
@@ -2771,37 +2838,7 @@ async function broadcastStatus() {
   if (sseClients.size === 0) return;
   try {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
-    const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
-    const agents = {};
-    let activeCount = 0;
-    for (const [key, agent] of Object.entries(registry.agents)) {
-      const live = resolveLive(agent, registry, liveByCwd);
-      const act = live ? await getAgentActivity(live.cwd) : null;
-      const active = isAgentActive(live, act);
-      if (active) activeCount++;
-      agents[key] = {
-        ...agent,
-        key,
-        live: !!live,
-        peer_id: live?.id || null,
-        last_seen: live?.last_seen || null,
-        live_summary: live?.summary || null,
-        pid: live?.pid || null,
-        tty: live?.tty || null,
-        last_activity_at: act?.last_activity_at ?? null,
-        waiting: act?.waiting ?? false,
-        active,
-      };
-    }
-    const payload = {
-      agents,
-      online_count: peers.length,
-      active_count: activeCount,
-      total_count: Object.keys(registry.agents).length,
-      meta: registry._meta || null,
-      soft_stops: Object.fromEntries(softStopState),
-      updated_at: new Date().toISOString(),
-    };
+    const payload = await buildStatusPayload(registry, peers);
     for (const res of sseClients) sseSend(res, "status", payload);
   } catch (e) {
     console.error("[sse] broadcast failed", e.message);
@@ -3288,37 +3325,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/status") {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
-    const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
-    const agents = {};
-    let activeCount = 0;
-    for (const [key, agent] of Object.entries(registry.agents)) {
-      const live = resolveLive(agent, registry, liveByCwd);
-      const act = live ? await getAgentActivity(live.cwd) : null;
-      const active = isAgentActive(live, act);
-      if (active) activeCount++;
-      agents[key] = {
-        ...agent,
-        key,
-        live: !!live,
-        peer_id: live?.id || null,
-        last_seen: live?.last_seen || null,
-        live_summary: live?.summary || null,
-        pid: live?.pid || null,
-        tty: live?.tty || null,
-        last_activity_at: act?.last_activity_at ?? null,
-        waiting: act?.waiting ?? false,
-        active,
-      };
-    }
-    return send(200, {
-      agents,
-      online_count: peers.length,
-      active_count: activeCount,
-      total_count: Object.keys(registry.agents).length,
-      meta: registry._meta || null,
-      soft_stops: Object.fromEntries(softStopState),
-      updated_at: new Date().toISOString(),
-    });
+    return send(200, await buildStatusPayload(registry, peers));
   }
 
   if (req.method === "GET" && url.pathname === "/api/agent-updaters") {
