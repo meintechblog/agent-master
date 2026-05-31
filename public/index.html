@@ -439,6 +439,18 @@
   .rule-src { font-size:11px; color:var(--text-dim); margin-top:9px; }
   .rule-src code, .rule-src a { font-size:11px; color:var(--accent); text-decoration:none; word-break:break-all; }
   .rule-src a:hover { text-decoration:underline; }
+  /* Test-Cases tab */
+  .test-card { border-left:3px solid var(--border); }
+  .test-card.test-pass { border-left-color:var(--green); }
+  .test-card.test-fail { border-left-color:var(--red); }
+  .test-card.test-pending { border-left-color:var(--yellow); }
+  .test-card.test-skipped { border-left-color:#444; }
+  .test-cards, #tests-wrap { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
+  .test-status { font-size:11px; font-weight:700; border:1px solid; border-radius:5px; padding:1px 7px; white-space:nowrap; }
+  .test-meta { font-size:11px; color:var(--text-dim); margin:2px 0 9px; }
+  .test-commit { font-size:11px; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:4px; padding:0 5px; }
+  .test-lbl { display:inline-block; font-size:10px; font-weight:700; letter-spacing:0.04em; color:var(--text-dim); margin-right:6px; vertical-align:middle; }
+  .test-result { font-size:13px; line-height:1.5; margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
   .tab-keepalive { font-size:10px; }
   .tab-role {
     font-size: 10px;
@@ -1592,6 +1604,7 @@
     <button class="view-btn"        id="view-board"    onclick="switchView('board')">📨 Board<span id="board-nav-badge" class="nav-badge" style="display:none"></span></button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
     <button class="view-btn"        id="view-rules"    onclick="switchView('rules')">📋 Regeln</button>
+    <button class="view-btn"        id="view-tests"    onclick="switchView('tests')">🧪 Tests</button>
     <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
   </div>
@@ -1773,6 +1786,20 @@
   </details>
   <div id="rules-agentnav" class="rules-agentnav"></div>
   <div id="rules-wrap"><div class="empty-tip">Lade Regeln…</div></div>
+</section>
+
+<section id="tests-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">🧪 Test-Cases · Verifikations-Log</h2>
+      <div class="section-hint">Bei jedem testbaren Fix: Änderung + Testplan + Ergebnis (pass/fail). Nachvollziehbarer Verlauf für den Operator, Workspace für die Agenten. <span id="tests-meta"></span></div>
+    </div>
+    <div class="usage-controls">
+      <button class="btn btn-secondary" onclick="loadTests(true)">⟳</button>
+    </div>
+  </div>
+  <div id="tests-filter" class="rules-agentnav"></div>
+  <div id="tests-wrap"><div class="empty-tip">Lade Test-Cases…</div></div>
 </section>
 
 <section id="github-view" style="display:none">
@@ -3052,7 +3079,7 @@ async function refreshHealthInBackground() {
 
 function switchView(v, push = true) {
   view = v;
-  for (const k of ["agents", "matrix", "github", "board", "skills", "rules", "usage", "settings"]) {
+  for (const k of ["agents", "matrix", "github", "board", "skills", "rules", "tests", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
@@ -3062,10 +3089,12 @@ function switchView(v, push = true) {
   document.getElementById("board-view").style.display      = v === "board"    ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
   document.getElementById("rules-view").style.display      = v === "rules"    ? "" : "none";
+  document.getElementById("tests-view").style.display      = v === "tests"    ? "" : "none";
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
   if (v === "rules") loadRules(false);
+  if (v === "tests") loadTests(false);
   if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
   if (v === "matrix") loadMatrix(false);
@@ -3094,7 +3123,7 @@ function selectAgent(key, opts = {}) {
 // Apply the current URL → view/agent (on load + back/forward).
 function applyRoute() {
   const seg = decodeURIComponent((location.pathname || "/").replace(/^\/+|\/+$/g, ""));
-  if (["matrix", "github", "board", "skills", "rules", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
+  if (["matrix", "github", "board", "skills", "rules", "tests", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
   if (seg && state && state.agents && state.agents[seg]) { active = seg; switchView("agents", false); render(); return; }
   switchView("agents", false);
 }
@@ -3180,6 +3209,50 @@ function renderRules() {
         <h3 class="rule-cat-title">${escapeHtml(cat)}</h3>
         <div class="rule-cards">${cats[cat].map(card).join("")}</div>
       </div>`).join("")}`;
+}
+
+// ── Test-Cases (🧪 Tests tab) ──
+let testsData = null;        // { cases: [...] }
+let testsFilter = "all";     // all | pass | fail | pending | skipped
+async function loadTests(force) {
+  if (testsData && !force) { renderTests(); return; }
+  try { testsData = await (await fetch("/api/test-cases")).json(); }
+  catch { testsData = testsData || { cases: [] }; }
+  renderTests();
+}
+function selectTestsFilter(f) { testsFilter = f; renderTests(); }
+function renderTests() {
+  const wrap = document.getElementById("tests-wrap");
+  const meta = document.getElementById("tests-meta");
+  const filt = document.getElementById("tests-filter");
+  if (!wrap) return;
+  const all = (testsData && testsData.cases) || [];
+  const counts = { all: all.length, pass: 0, fail: 0, pending: 0, skipped: 0 };
+  for (const c of all) if (counts[c.status] != null) counts[c.status]++;
+  if (meta) meta.textContent = all.length ? `${counts.pass} pass · ${counts.fail} fail · ${counts.pending} pending` : "";
+  if (filt) {
+    const f = (key, label) => `<button class="rules-agent-btn${testsFilter === key ? " active" : ""}" onclick="selectTestsFilter('${key}')">${label} <span class="rules-agent-count">${counts[key]}</span></button>`;
+    filt.innerHTML = f("all", "Alle") + f("pass", "✅ pass") + f("fail", "❌ fail") + f("pending", "⏳ pending") + f("skipped", "⊘ skipped");
+  }
+  let list = testsFilter === "all" ? all : all.filter((c) => c.status === testsFilter);
+  if (!list.length) { wrap.innerHTML = `<div class="empty-tip">${all.length ? "Keine Cases in diesem Filter." : "Noch keine Test-Cases. Agenten/Hub posten sie via <code>POST /api/test-cases/record</code> bei testbaren Fixes."}</div>`; return; }
+  const badge = (s) => {
+    const m = { pass: ["✅", "var(--green)"], fail: ["❌", "var(--red)"], pending: ["⏳", "var(--yellow)"], skipped: ["⊘", "var(--text-dim)"] }[s] || ["•", "var(--text-dim)"];
+    return `<span class="test-status" style="color:${m[1]};border-color:${m[1]}">${m[0]} ${s}</span>`;
+  };
+  const when = (ts) => ts ? new Date(ts).toLocaleString("de-DE") : "—";
+  const commitHtml = (c) => c ? `<code class="test-commit">${escapeHtml(c)}</code>` : "";
+  wrap.innerHTML = list.map((c) => `
+    <div class="rule-card test-card test-${c.status}">
+      <div class="rule-card-head">
+        ${badge(c.status)}
+        <span class="rule-title">${escapeHtml(c.title)}</span>
+      </div>
+      <div class="test-meta">${escapeHtml(c.agent || "")} ${commitHtml(c.commit)} · ${when(c.updated_at)}</div>
+      ${c.change ? `<div class="rule-line"><span class="test-lbl">ÄNDERUNG</span> ${escapeHtml(c.change)}</div>` : ""}
+      ${c.test_plan ? `<div class="rule-line"><span class="test-lbl">TESTPLAN</span> ${escapeHtml(c.test_plan)}</div>` : ""}
+      ${c.result ? `<div class="test-result"><span class="test-lbl">ERGEBNIS</span> ${escapeHtml(c.result)}</div>` : ""}
+    </div>`).join("");
 }
 
 // ── GitHub issue/PR tracker (📥 GitHub tab, per-agent badges, detail section) ──

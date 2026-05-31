@@ -1573,6 +1573,23 @@ function sanitizeRules(input) {
   return { rules: out };
 }
 
+// === Test-case / verification log ===
+// A browsable log of changes + their test plan + pass/fail result. The Hub (and
+// any agent) records a case when applying a fix that's sensibly testable, so Jörg
+// has a verification trail and the agent has a working space (TDD-ish). Store:
+//   { cases: { "<id>": { id, title, agent, commit, change, test_plan, status,
+//                         result, created_at, updated_at } } }
+const TEST_CASES_PATH = path.join(__dirname, "data", "test-cases.json");
+const TEST_CASE_STATUSES = new Set(["pass", "fail", "pending", "skipped"]);
+async function readTestCases() {
+  try { return JSON.parse(await fs.readFile(TEST_CASES_PATH, "utf8")); } catch { return { cases: {} }; }
+}
+async function writeTestCasesAtomic(store) {
+  const tmp = TEST_CASES_PATH + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(store, null, 2));
+  await fs.rename(tmp, TEST_CASES_PATH);
+}
+
 async function registryFillTick() {
   try {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
@@ -3181,6 +3198,8 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
         { method: "GET",  path: "/api/agent-rules",       purpose: "read structured behavior-rules for all agents, or one (?agent=<key>). Operator browses how each agent routes/handles messages." },
         { method: "POST", path: "/api/agent-rules/self-update", purpose: "an agent publishes its COMPLETE behavior-rule list (declarative/idempotent, replaces the set). Each rule: {id,title,category,condition,action,priority?,source?,example?,note?}.", body: { agent: "<key>", display_name: "<optional>", rules: [{ id: "prefixless-to-brain", title: "Prefixlos → Brain", category: "routing", condition: "Nachricht ohne @agent", action: "immer an Brain, nie topic-geraten", priority: 1, source: "gateway/src/routing.mjs", example: "…" }] } },
+        { method: "GET",  path: "/api/test-cases",       purpose: "verification log: list test cases, filter ?status=pass|fail|pending|skipped or ?agent=<key>. Backs the 🧪 Tests tab." },
+        { method: "POST", path: "/api/test-cases/record", purpose: "record (upsert) a test case when applying a sensibly-testable fix: what changed + test plan + pass/fail result. TDD-style trail for the operator.", body: { id: "<optional slug>", title: "<was>", agent: "<key>", commit: "<sha>", change: "<was geändert>", test_plan: "<wie verifiziert>", status: "pass|fail|pending|skipped", result: "<beobachtet>" } },
         { method: "POST", path: "/api/agent-setting",    purpose: "operator toggle for per-agent lifecycle settings. keep_alive=true → always-on (Hub auto-respawns it if down + never idle-shuts it down). lifecycle_idle_exempt=true → weaker: skip idle-shutdown only (no auto-respawn). Context-recycle at ≥60% usable applies to all regardless.", body: { agent: "<key>", keep_alive: true, lifecycle_idle_exempt: true } },
         { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
           query: { refresh: "1 to bypass the 5 min cache" } },
@@ -3529,6 +3548,49 @@ async function handleApi(req, res, url) {
     await writeAgentRulesAtomic(store);
     auditEvent("agent.rules.self_update", { target: key }, `Agent-Rules ${key}: ${result.rules.length} Regeln`).catch(() => {});
     return send(200, { ok: true, agent: key, count: result.rules.length });
+  }
+
+  // Test-case / verification log: list, or filter (?status=, ?agent=).
+  if (req.method === "GET" && url.pathname === "/api/test-cases") {
+    const store = await readTestCases();
+    let list = Object.values(store.cases || {});
+    const st = url.searchParams.get("status");
+    const ag = url.searchParams.get("agent");
+    if (st) list = list.filter((c) => c.status === st);
+    if (ag) list = list.filter((c) => c.agent === ag);
+    list.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    return send(200, { cases: list, count: list.length });
+  }
+
+  // Record (upsert) a test case. The Hub or any agent posts a case when applying a
+  // sensibly-testable fix: what changed, the test plan, and the pass/fail result.
+  if (req.method === "POST" && url.pathname === "/api/test-cases/record") {
+    const body = (await readBody()) || {};
+    const title = (typeof body.title === "string" ? body.title.trim() : "").slice(0, 200);
+    if (!title) return send(400, { error: "missing_title" });
+    const status = TEST_CASE_STATUSES.has(body.status) ? body.status : "pending";
+    const str = (v, max = 4000) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+    let id = str(body.id, 120).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!id) id = title.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || `case-${Date.now()}`;
+    const store = await readTestCases();
+    store.cases = store.cases || {};
+    const now = Date.now();
+    const prev = store.cases[id] || {};
+    store.cases[id] = {
+      id, title,
+      agent: str(body.agent, 80) || prev.agent || "agent-master",
+      commit: str(body.commit, 80) || prev.commit || "",
+      change: str(body.change) || prev.change || "",
+      test_plan: str(body.test_plan) || prev.test_plan || "",
+      status,
+      result: str(body.result) || (body.result === "" ? "" : prev.result || ""),
+      created_at: prev.created_at || now,
+      updated_at: now,
+    };
+    if (store.cases[id].test_plan.length > 8000) store.cases[id].test_plan = store.cases[id].test_plan.slice(0, 8000);
+    await writeTestCasesAtomic(store);
+    auditEvent("test.case.record", { target: store.cases[id].agent }, `Test-Case ${id}: ${status}`).catch(() => {});
+    return send(200, { ok: true, id, status });
   }
 
   // An agent patches its OWN registry entry (capabilities / when_to_use / owned_endpoints / …).

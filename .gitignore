@@ -35,3 +35,4 @@ launchd/*.local.plist
 data/.wa-phone
 data/github-tracker.json
 data/agent-rules.json
+data/test-cases.json
