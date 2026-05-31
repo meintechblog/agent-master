@@ -1524,6 +1524,55 @@ async function writeFillState(s) {
   try { await fs.writeFile(REGISTRY_FILL_PATH, JSON.stringify(s, null, 2)); } catch {}
 }
 
+// === Agent behavior-rules store ===
+// A generic, doc-style store where any agent can publish its STRUCTURED behavioral
+// rules (routing/channel/forwarding/…) so the operator can browse — in the Hub UI —
+// exactly how each agent treats messages. Self-maintained per agent: an agent POSTs
+// its COMPLETE rule list to /api/agent-rules/self-update (declarative/idempotent,
+// like registry self-update — the agent owns its full set). Shape on disk:
+//   { agents: { "<key>": { display_name, updated_at, rules: [Rule] } } }
+// Rule = { id, title, category, condition, action, priority?, source?, example?, note? }
+const AGENT_RULES_PATH = path.join(__dirname, "data", "agent-rules.json");
+const AGENT_RULES_MAX = 200;        // per agent — backstop against abuse
+const RULE_FIELD_MAX = 2000;        // per string field
+async function readAgentRules() {
+  try { return JSON.parse(await fs.readFile(AGENT_RULES_PATH, "utf8")); } catch { return { agents: {} }; }
+}
+async function writeAgentRulesAtomic(store) {
+  const tmp = AGENT_RULES_PATH + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(store, null, 2));
+  await fs.rename(tmp, AGENT_RULES_PATH);
+}
+// Validate + normalize a posted rule list. Returns { rules } or { error }.
+function sanitizeRules(input) {
+  if (!Array.isArray(input)) return { error: "rules_not_array" };
+  if (input.length > AGENT_RULES_MAX) return { error: "too_many_rules", max: AGENT_RULES_MAX };
+  const str = (v, max = RULE_FIELD_MAX) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const out = [];
+  const seenIds = new Set();
+  for (let i = 0; i < input.length; i++) {
+    const r = input[i] || {};
+    const title = str(r.title, 200);
+    const category = str(r.category, 80) || "general";
+    const condition = str(r.condition);
+    const action = str(r.action);
+    if (!title) return { error: `rule_${i}_missing_title` };
+    if (!condition && !action) return { error: `rule_${i}_missing_condition_and_action` };
+    let id = str(r.id, 120).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!id) id = `rule-${i}`;
+    while (seenIds.has(id)) id = `${id}-${i}`;
+    seenIds.add(id);
+    const priority = Number.isFinite(Number(r.priority)) ? Number(r.priority) : 100;
+    out.push({
+      id, title, category, condition, action, priority,
+      source: str(r.source, 300),
+      example: str(r.example),
+      note: str(r.note),
+    });
+  }
+  return { rules: out };
+}
+
 async function registryFillTick() {
   try {
     const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
@@ -3131,6 +3180,8 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
+        { method: "GET",  path: "/api/agent-rules",       purpose: "read structured behavior-rules for all agents, or one (?agent=<key>). Operator browses how each agent routes/handles messages." },
+        { method: "POST", path: "/api/agent-rules/self-update", purpose: "an agent publishes its COMPLETE behavior-rule list (declarative/idempotent, replaces the set). Each rule: {id,title,category,condition,action,priority?,source?,example?,note?}.", body: { agent: "<key>", display_name: "<optional>", rules: [{ id: "prefixless-to-brain", title: "Prefixlos → Brain", category: "routing", condition: "Nachricht ohne @agent", action: "immer an Brain, nie topic-geraten", priority: 1, source: "gateway/src/routing.mjs", example: "…" }] } },
         { method: "POST", path: "/api/agent-setting",    purpose: "operator toggle for per-agent lifecycle settings. keep_alive=true → always-on (Hub auto-respawns it if down + never idle-shuts it down). lifecycle_idle_exempt=true → weaker: skip idle-shutdown only (no auto-respawn). Context-recycle at ≥60% usable applies to all regardless.", body: { agent: "<key>", keep_alive: true, lifecycle_idle_exempt: true } },
         { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
           query: { refresh: "1 to bypass the 5 min cache" } },
@@ -3452,6 +3503,34 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/registry") return send(200, await readRegistry());
+
+  // Agent behavior-rules: read all, or one agent's set (?agent=<key>).
+  if (req.method === "GET" && url.pathname === "/api/agent-rules") {
+    const store = await readAgentRules();
+    const who = url.searchParams.get("agent");
+    if (who) return send(200, { agent: who, ...(store.agents?.[who] || { display_name: who, updated_at: null, rules: [] }) });
+    return send(200, store);
+  }
+
+  // An agent publishes its OWN complete rule list (declarative / idempotent).
+  if (req.method === "POST" && url.pathname === "/api/agent-rules/self-update") {
+    const body = (await readBody()) || {};
+    const key = body.agent;
+    if (!key) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[key]) return send(404, { error: "unknown_agent" });
+    const result = sanitizeRules(body.rules);
+    if (result.error) return send(400, result);
+    const store = await readAgentRules();
+    store.agents = store.agents || {};
+    const display_name = (typeof body.display_name === "string" && body.display_name.trim())
+      ? body.display_name.trim().slice(0, 120)
+      : (registry.agents[key].display_name || key);
+    store.agents[key] = { display_name, updated_at: Date.now(), rules: result.rules };
+    await writeAgentRulesAtomic(store);
+    auditEvent("agent.rules.self_update", { target: key }, `Agent-Rules ${key}: ${result.rules.length} Regeln`).catch(() => {});
+    return send(200, { ok: true, agent: key, count: result.rules.length });
+  }
 
   // An agent patches its OWN registry entry (capabilities / when_to_use / owned_endpoints / …).
   if (req.method === "POST" && url.pathname === "/api/registry/self-update") {

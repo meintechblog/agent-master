@@ -404,6 +404,30 @@
   .matrix-table .mx-dot.live { background: var(--green); box-shadow: 0 0 5px var(--green); }
   .matrix-table .mx-dot.offline { background:#444; }
   .matrix-table .health-led { display:inline-block; width:9px;height:9px;border-radius:50%; }
+  /* Agent-rules tab */
+  .rules-agentnav { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 18px; }
+  .rules-agent-btn { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600; display:inline-flex; align-items:center; gap:7px; }
+  .rules-agent-btn:hover { border-color:var(--accent); }
+  .rules-agent-btn.active { background:rgba(var(--accent-rgb),0.14); border-color:var(--accent); color:var(--accent); }
+  .rules-agent-count { background:rgba(255,255,255,0.08); color:var(--text-dim); border-radius:10px; padding:1px 7px; font-size:11px; font-weight:700; }
+  .rules-updated { color:var(--text-dim); font-size:11px; margin-bottom:14px; }
+  .rule-cat { margin-bottom:22px; }
+  .rule-cat-title { font-size:12px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-dim); border-bottom:1px solid var(--border); padding-bottom:6px; margin:0 0 12px; }
+  .rule-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
+  .rule-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg,10px); padding:13px 15px; box-shadow:var(--shadow); }
+  .rule-card-head { display:flex; align-items:baseline; gap:9px; margin-bottom:9px; }
+  .rule-prio { color:var(--text-dim); font-size:11px; font-variant-numeric:tabular-nums; font-weight:700; }
+  .rule-title { font-weight:600; font-size:14px; color:var(--text); }
+  .rule-line { font-size:13px; line-height:1.5; margin:3px 0; }
+  .rule-when, .rule-then { display:inline-block; font-size:10px; font-weight:700; letter-spacing:0.04em; padding:1px 6px; border-radius:4px; margin-right:6px; vertical-align:middle; }
+  .rule-when { background:rgba(253,203,110,0.16); color:var(--yellow); }
+  .rule-then { background:rgba(0,184,148,0.16); color:var(--green); }
+  .rule-example { font-size:12px; color:var(--text-dim); margin-top:8px; font-style:italic; }
+  .rule-note { font-size:12px; color:var(--text-dim); margin-top:8px; }
+  .rule-src { font-size:11px; color:var(--text-dim); margin-top:9px; }
+  .rule-src code, .rule-src a { font-size:11px; color:var(--accent); text-decoration:none; word-break:break-all; }
+  .rule-src a:hover { text-decoration:underline; }
+  .tab-keepalive { font-size:10px; }
   .tab-role {
     font-size: 10px;
     color: var(--text-dim);
@@ -1555,6 +1579,7 @@
     <button class="view-btn"        id="view-github"   onclick="switchView('github')">📥 GitHub<span id="github-nav-badge" class="nav-badge" style="display:none"></span></button>
     <button class="view-btn"        id="view-board"    onclick="switchView('board')">📨 Board<span id="board-nav-badge" class="nav-badge" style="display:none"></span></button>
     <button class="view-btn"        id="view-skills"   onclick="switchView('skills')">🧩 Skills</button>
+    <button class="view-btn"        id="view-rules"    onclick="switchView('rules')">📋 Regeln</button>
     <button class="view-btn"        id="view-usage"    onclick="switchView('usage')">📊 Usage</button>
     <button class="view-btn"        id="view-settings" onclick="switchView('settings')">⚙️ Settings</button>
   </div>
@@ -1698,6 +1723,20 @@
     </div>
   </div>
   <div id="matrix-wrap"><div class="empty-tip">Lade Matrix…</div></div>
+</section>
+
+<section id="rules-view" style="display:none">
+  <div class="usage-head">
+    <div>
+      <h2 class="usage-title">📋 Agent-Regeln</h2>
+      <div class="section-hint">Wie jeder Agent Nachrichten routet/behandelt — strukturiert + nachvollziehbar. Jeder Agent pflegt seinen Bereich selbst (<code>POST /api/agent-rules/self-update</code>). <span id="rules-meta"></span></div>
+    </div>
+    <div class="usage-controls">
+      <button class="btn btn-secondary" onclick="loadRules(true)">⟳</button>
+    </div>
+  </div>
+  <div id="rules-agentnav" class="rules-agentnav"></div>
+  <div id="rules-wrap"><div class="empty-tip">Lade Regeln…</div></div>
 </section>
 
 <section id="github-view" style="display:none">
@@ -2977,7 +3016,7 @@ async function refreshHealthInBackground() {
 
 function switchView(v, push = true) {
   view = v;
-  for (const k of ["agents", "matrix", "github", "board", "skills", "usage", "settings"]) {
+  for (const k of ["agents", "matrix", "github", "board", "skills", "rules", "usage", "settings"]) {
     const btn = document.getElementById("view-" + k);
     if (btn) btn.classList.toggle("active", v === k);
   }
@@ -2986,9 +3025,11 @@ function switchView(v, push = true) {
   document.getElementById("github-view").style.display     = v === "github"   ? "" : "none";
   document.getElementById("board-view").style.display      = v === "board"    ? "" : "none";
   document.getElementById("skills-view").style.display     = v === "skills"   ? "" : "none";
+  document.getElementById("rules-view").style.display      = v === "rules"    ? "" : "none";
   document.getElementById("usage-view").style.display      = v === "usage"    ? "" : "none";
   document.getElementById("settings-view").style.display   = v === "settings" ? "" : "none";
   if (v === "skills"   && !skillsData) loadSkills(false);
+  if (v === "rules") loadRules(false);
   if (v === "usage")  { loadUsageMatrix(); loadSessionUsage(false); }
   if (v === "settings") { loadSources(); loadBriefing(); }
   if (v === "matrix") loadMatrix(false);
@@ -3017,7 +3058,7 @@ function selectAgent(key, opts = {}) {
 // Apply the current URL → view/agent (on load + back/forward).
 function applyRoute() {
   const seg = decodeURIComponent((location.pathname || "/").replace(/^\/+|\/+$/g, ""));
-  if (["matrix", "github", "board", "skills", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
+  if (["matrix", "github", "board", "skills", "rules", "usage", "settings"].includes(seg)) { switchView(seg, false); return; }
   if (seg && state && state.agents && state.agents[seg]) { active = seg; switchView("agents", false); render(); return; }
   switchView("agents", false);
 }
@@ -3028,6 +3069,68 @@ window.addEventListener("resize", () => {
   clearTimeout(_resizeTabsT);
   _resizeTabsT = setTimeout(() => { if (state && state.agents) renderTabs(); }, 200);
 });
+
+// ── Agent behavior-rules (📋 Regeln tab) ──
+let rulesData = null;          // { agents: { key: {display_name, updated_at, rules:[]} } }
+let rulesActiveAgent = null;
+async function loadRules(force) {
+  if (rulesData && !force) { renderRules(); return; }
+  try { rulesData = await (await fetch("/api/agent-rules")).json(); }
+  catch { rulesData = rulesData || { agents: {} }; }
+  renderRules();
+}
+function selectRulesAgent(key) { rulesActiveAgent = key; renderRules(); }
+function renderRules() {
+  const nav = document.getElementById("rules-agentnav");
+  const wrap = document.getElementById("rules-wrap");
+  const meta = document.getElementById("rules-meta");
+  if (!nav || !wrap) return;
+  const agents = (rulesData && rulesData.agents) || {};
+  const keys = Object.keys(agents).filter((k) => (agents[k].rules || []).length).sort();
+  if (!keys.length) {
+    nav.innerHTML = "";
+    wrap.innerHTML = `<div class="empty-tip">Noch keine Agent-Regeln hinterlegt. Agenten publizieren sie via <code>POST /api/agent-rules/self-update</code>.</div>`;
+    if (meta) meta.textContent = "";
+    return;
+  }
+  if (!rulesActiveAgent || !agents[rulesActiveAgent]) rulesActiveAgent = keys[0];
+  nav.innerHTML = keys.map((k) =>
+    `<button class="rules-agent-btn${k === rulesActiveAgent ? " active" : ""}" onclick="selectRulesAgent('${k}')">${agents[k].display_name || k} <span class="rules-agent-count">${(agents[k].rules || []).length}</span></button>`
+  ).join("");
+  if (meta) meta.textContent = `${keys.length} Agent(en) · ${Object.values(agents).reduce((n, a) => n + (a.rules || []).length, 0)} Regeln gesamt`;
+
+  const a = agents[rulesActiveAgent];
+  const rules = (a.rules || []).slice().sort((x, y) => (x.priority ?? 100) - (y.priority ?? 100));
+  // Group by category, keep priority order within.
+  const cats = {};
+  for (const r of rules) (cats[r.category || "general"] = cats[r.category || "general"] || []).push(r);
+  const upd = a.updated_at ? new Date(a.updated_at).toLocaleString("de-DE") : "—";
+  const srcHtml = (s) => {
+    if (!s) return "";
+    const safe = escapeHtml(s);
+    const link = /^https?:\/\//.test(s) ? `<a href="${safe}" target="_blank" rel="noopener">${safe}</a>` : `<code>${safe}</code>`;
+    return `<div class="rule-src" title="Quelle">📎 ${link}</div>`;
+  };
+  const card = (r) => `
+    <div class="rule-card">
+      <div class="rule-card-head">
+        <span class="rule-prio" title="Priorität">#${r.priority ?? 100}</span>
+        <span class="rule-title">${escapeHtml(r.title)}</span>
+      </div>
+      ${r.condition ? `<div class="rule-line"><span class="rule-when">WENN</span> ${escapeHtml(r.condition)}</div>` : ""}
+      ${r.action ? `<div class="rule-line"><span class="rule-then">DANN</span> ${escapeHtml(r.action)}</div>` : ""}
+      ${r.example ? `<div class="rule-example">Beispiel: ${escapeHtml(r.example)}</div>` : ""}
+      ${r.note ? `<div class="rule-note">${escapeHtml(r.note)}</div>` : ""}
+      ${srcHtml(r.source)}
+    </div>`;
+  wrap.innerHTML = `
+    <div class="rules-updated">Zuletzt aktualisiert: ${upd}</div>
+    ${Object.keys(cats).sort().map((cat) => `
+      <div class="rule-cat">
+        <h3 class="rule-cat-title">${escapeHtml(cat)}</h3>
+        <div class="rule-cards">${cats[cat].map(card).join("")}</div>
+      </div>`).join("")}`;
+}
 
 // ── GitHub issue/PR tracker (📥 GitHub tab, per-agent badges, detail section) ──
 let githubData = null;

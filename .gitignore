@@ -34,3 +34,4 @@ launchd/*.local.plist
 *.jpeg
 data/.wa-phone
 data/github-tracker.json
+data/agent-rules.json
