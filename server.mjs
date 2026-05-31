@@ -1837,31 +1837,54 @@ async function spawnAgent(repoKey, registry) {
   await fs.writeFile(cjPath, JSON.stringify(cj, null, 2));
 
   // The `claudepeers` command is an expect-wrapper (installed by install.sh into
-  // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. We open a fresh
-  // Terminal window via `do script` (NO target clause → always a new window) and
-  // poll the broker until the peer registers (or timeout).
+  // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. We then poll the
+  // broker until the peer registers (or timeout).
   //
-  // RELIABILITY FIX (2026-05-31): the old approach sent `keystroke "t" using command
-  // down` (cmd+t for a new TAB) then `do script ... in selected tab of front window`.
-  // That raced badly: if a RUNNING claude TUI was Terminal's front window (the Hub's
-  // own window, or any live agent), the cmd+t/do-script landed in THAT window instead
-  // of a new tab — the new session never started, and `id of front window` returned
-  // the wrong (existing) window id. Observed in the wild: recycle + keep-alive +
-  // notify respawns of energy-master AND chat-llm-master all stuck `registered:false`,
-  // every one reporting window=1256 = the Hub's OWN window. `do script` with no `in`
-  // clause sidesteps the race entirely by always opening a brand-new window. Costs an
-  // extra window per spawn (vs a tab) — acceptable price for reliable respawns.
+  // Spawn placement (2026-05-31, Jörg-Wunsch: TAB im vorhandenen Terminal statt neues
+  // Fenster) — ROBUST mit Fallback:
+  //   1. cmd+t (System Events) öffnet einen neuen TAB im Front-Fenster.
+  //   2. Wir VERIFIZIEREN per Tab-Count (vorher/nachher), dass wirklich ein neuer Tab
+  //      entstand. Nur DANN läuft `do script ... in selected tab` rein.
+  //   3. Schlug cmd+t fehl (Terminal nicht fokussiert / Race) → Tab-Count unverändert →
+  //      Fallback: `do script` OHNE Target = sauberes NEUES FENSTER.
+  // So tippt der Spawn NIE mehr blind in einen bestehenden Tab (der alte Bug, der
+  // recycle/keep-alive/notify-Respawns ins Hub-Fenster 1256 = registered:false trieb).
+  // Worst case ist ein neues Fenster (der bewährt zuverlässige Pfad), nie der Silent-Fail.
+  const cmd = `cd ${cwd} && CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers`;
   const script = `
+    tell application "Terminal" to activate
+    delay 0.3
+    set canTab to false
+    set n0 to 0
     tell application "Terminal"
-      activate
-      do script "cd ${cwd} && CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers"
-      delay 0.5
-      -- Fixed window/tab title = agent key, so Jörg sees which agent lives where at a
-      -- glance. CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 stops Claude Code from rewriting
-      -- the title with its task status (Terminal.app is last-writer-wins).
-      set custom title of (selected tab of front window) to "${repoKey}"
-      return id of front window
+      if (count of windows) > 0 then
+        set n0 to (count of tabs of front window)
+        set canTab to true
+      end if
     end tell
+    set madeTab to false
+    set targetWid to 0
+    if canTab then
+      tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
+      delay 0.7
+      tell application "Terminal"
+        if (count of tabs of front window) > n0 then
+          set madeTab to true
+          do script "${cmd}" in selected tab of front window
+          set custom title of (selected tab of front window) to "${repoKey}"
+          set targetWid to id of front window
+        end if
+      end tell
+    end if
+    if madeTab is false then
+      tell application "Terminal"
+        do script "${cmd}"
+        delay 0.5
+        set custom title of (selected tab of front window) to "${repoKey}"
+        set targetWid to id of front window
+      end tell
+    end if
+    return targetWid
   `;
   const wid = parseInt(await runOsa(script), 10);
   if (Number.isFinite(wid)) {
