@@ -2752,6 +2752,18 @@ const CTX_TMPDIR = (() => {
   catch { return process.env.TMPDIR || "/tmp"; }
 })();
 const ctxFillCache = new Map(); // slug -> { val, at }
+// Claude Code's statusline reserves ~16.5% of the raw window as an auto-compact
+// buffer and shows the *usable*-normalized fill. The bridge file gives RAW
+// remaining_percentage, so the Hub historically read ~13pt lower than Jörg's
+// statusline (he saw 68%, the watcher 57%). Normalize to the SAME usable metric
+// the statusline shows so thresholds (WARNING/CRITICAL/recycle) mean what Jörg
+// sees: usable_used = 100 - max(0, (remaining - 16.5) / (100 - 16.5) * 100).
+const CTX_COMPACT_BUFFER_PCT = 16.5;
+function usableUsedPct(rawRemaining) {
+  if (typeof rawRemaining !== "number" || Number.isNaN(rawRemaining)) return null;
+  const usableRemaining = Math.max(0, ((rawRemaining - CTX_COMPACT_BUFFER_PCT) / (100 - CTX_COMPACT_BUFFER_PCT)) * 100);
+  return Math.round(100 - usableRemaining);
+}
 async function getAgentContextFill(cwd) {
   if (!cwd) return null;
   const slug = cwdToProjectSlug(cwd);
@@ -2771,7 +2783,14 @@ async function getAgentContextFill(cwd) {
   if (sid) {
     try {
       const m = JSON.parse(await fs.readFile(path.join(CTX_TMPDIR, `claude-ctx-${sid}.json`), "utf8"));
-      val = { used_pct: m.used_pct, remaining: m.remaining_percentage, age_s: Math.floor(now / 1000) - (m.timestamp || 0), session_id: sid };
+      const usable = usableUsedPct(m.remaining_percentage);
+      val = {
+        used_pct: usable ?? m.used_pct, // usable-normalized (statusline metric); raw fallback
+        used_pct_raw: m.used_pct,
+        remaining: m.remaining_percentage,
+        age_s: Math.floor(now / 1000) - (m.timestamp || 0),
+        session_id: sid,
+      };
     } catch {}
   }
   ctxFillCache.set(slug, { val, at: now });
@@ -2788,7 +2807,7 @@ async function getAgentContextFill(cwd) {
 // but never for idle-shutdown.
 const LIFECYCLE_ENABLED = process.env.HUB_LIFECYCLE !== "off"; // default on
 const LIFECYCLE_TICK_MS = 60_000;
-const CTX_RECYCLE_PCT = 60;                  // used_pct → recycle
+const CTX_RECYCLE_PCT = 60;                  // usable_used_pct → recycle (statusline metric, ~raw 50%)
 const IDLE_SHUTDOWN_MS = 3 * 60 * 60 * 1000; // 3h idle → clean shutdown
 const LIFECYCLE_GRACE_MS = 120_000;          // checkpoint window before acting
 const LIFECYCLE_COOLDOWN_MS = 20 * 60 * 1000;
