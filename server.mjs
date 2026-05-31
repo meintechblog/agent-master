@@ -1820,30 +1820,29 @@ async function spawnAgent(repoKey, registry) {
   await fs.writeFile(cjPath, JSON.stringify(cj, null, 2));
 
   // The `claudepeers` command is an expect-wrapper (installed by install.sh into
-  // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. No sleep + no
-  // AppleScript keystroke needed here — we just open a tab, run claudepeers, and
+  // ~/.local/bin) that auto-dismisses the dev-channel trust prompt. We open a fresh
+  // Terminal window via `do script` (NO target clause → always a new window) and
   // poll the broker until the peer registers (or timeout).
-  // Race-condition fix (2026-05-28): the `keystroke "t" using command down`
-  // used to fire before Terminal was actually frontmost when another app
-  // (browser, editor) was in focus. The `t` then landed as a literal in the
-  // foreground app's input — observed in the wild as `tcd /path && claudepeers`
-  // appearing in the *previous* shell, with no new tab opening. The 300 ms
-  // delay after `activate` gives the WindowServer time to bring Terminal
-  // forward before System Events targets it.
+  //
+  // RELIABILITY FIX (2026-05-31): the old approach sent `keystroke "t" using command
+  // down` (cmd+t for a new TAB) then `do script ... in selected tab of front window`.
+  // That raced badly: if a RUNNING claude TUI was Terminal's front window (the Hub's
+  // own window, or any live agent), the cmd+t/do-script landed in THAT window instead
+  // of a new tab — the new session never started, and `id of front window` returned
+  // the wrong (existing) window id. Observed in the wild: recycle + keep-alive +
+  // notify respawns of energy-master AND chat-llm-master all stuck `registered:false`,
+  // every one reporting window=1256 = the Hub's OWN window. `do script` with no `in`
+  // clause sidesteps the race entirely by always opening a brand-new window. Costs an
+  // extra window per spawn (vs a tab) — acceptable price for reliable respawns.
   const script = `
-    tell application "Terminal" to activate
-    delay 0.3
-    tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
-    delay 1
     tell application "Terminal"
-      do script "cd ${cwd} && CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers" in selected tab of front window
-      -- Fixed tab title = agent key, so Jörg sees which agent lives in which tab
-      -- at a glance. CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 stops Claude Code from
-      -- continuously rewriting the tab title with its task status (Terminal.app is
-      -- last-writer-wins, so without it claude clobbers our repoKey within seconds).
-      -- Scoped to the spawned session only — Joerg's own claude sessions keep their
-      -- activity titles.
-      set custom title of selected tab of front window to "${repoKey}"
+      activate
+      do script "cd ${cwd} && CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claudepeers"
+      delay 0.5
+      -- Fixed window/tab title = agent key, so Jörg sees which agent lives where at a
+      -- glance. CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 stops Claude Code from rewriting
+      -- the title with its task status (Terminal.app is last-writer-wins).
+      set custom title of (selected tab of front window) to "${repoKey}"
       return id of front window
     end tell
   `;
