@@ -1820,6 +1820,9 @@ async function recycleAgent(repoKey, registry) {
   const agent = registry.agents[repoKey];
   if (!agent) throw new Error(`unknown agent: ${repoKey}`);
   const log = (m) => fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} recycle ${repoKey} ${m}\n`).catch(() => {});
+  // Suppress keep-alive auto-respawn during the recycle's own stop→respawn window,
+  // so an always-on agent isn't double-spawned (the recycle brings it back itself).
+  keepAliveCooldown.set(repoKey, Date.now());
   await log("begin → stop");
   await stopAgent(repoKey, registry).catch((e) => log(`stop err: ${e.message}`));
   await new Promise((r) => setTimeout(r, 3000));         // let the tab close settle
