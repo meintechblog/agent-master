@@ -2460,6 +2460,16 @@ function renderContent() {
       ${renderDeployment(a.deployment)}
     </div>
 
+    ${a.is_service ? "" : `
+    <div class="panel-section">
+      <h3>♻️ Lifecycle</h3>
+      <label class="idle-exempt-row" title="Wenn gesetzt, wird diese Session NICHT automatisch nach 3h Idle heruntergefahren. Context-Recycle bei ≥60% greift trotzdem.">
+        <input type="checkbox" id="idle-exempt-cb" ${a.lifecycle_idle_exempt ? "checked" : ""}
+               onchange="toggleIdleExempt('${active}', this.checked)">
+        <span>Bleibt bei Idle an <span style="color:var(--text-dim);font-weight:400">(kein Auto-Idle-Shutdown; Context-Recycle ≥60% gilt weiter)</span></span>
+      </label>
+    </div>`}
+
     <div class="panel-section">
       <h3>Skills / Capabilities</h3>
       <div class="chips">${caps || '<span class="empty-tip">noch keine erfasst</span>'}</div>
@@ -2897,6 +2907,20 @@ async function handleSoftStopExtend(key) {
 async function handleSoftStopCancel(key) {
   if (!confirm(`Soft-Stop für ${key} abbrechen? Agent läuft normal weiter.`)) return;
   await postJson("/api/soft-stop-cancel", { agent: key }, `↩︎ Soft-Stop für ${key} abbrechen…`);
+}
+
+async function toggleIdleExempt(key, checked) {
+  // Light fetch — don't blow away the panel; SSE re-render reflects the new state.
+  try {
+    const r = await fetch("/api/agent-setting", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: key, lifecycle_idle_exempt: checked }),
+    });
+    const d = await r.json();
+    if (d.error) { alert("Fehler: " + d.error); const cb = document.getElementById("idle-exempt-cb"); if (cb) cb.checked = !checked; }
+  } catch (e) {
+    alert(e.message); const cb = document.getElementById("idle-exempt-cb"); if (cb) cb.checked = !checked;
+  }
 }
 
 async function postJson(path, body, pendingMsg) {

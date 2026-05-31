@@ -1487,6 +1487,7 @@ const REGISTRY_FILLABLE = new Set([
   "capabilities", "when_to_use", "owned_endpoints", "mqtt_topics",
   "depends_on", "tags", "description", "display_name", "service_url",
   "live_dashboards", "repo_url", "recurring_tasks",
+  "lifecycle_idle_exempt", // bool: skip auto idle-shutdown (NOT context-recycle)
 ]);
 
 function registryEntryIsThin(a) {
@@ -2857,7 +2858,7 @@ async function lifecycleTick() {
       // No pending action → fresh detection.
       let want = null;
       if (critical) want = "recycle";
-      else if (key !== "agent-master" && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
+      else if (key !== "agent-master" && !agent.lifecycle_idle_exempt && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
       if (!want) continue;
 
       const secs = Math.round(LIFECYCLE_GRACE_MS / 1000);
@@ -2917,6 +2918,7 @@ async function buildStatusPayload(registry, peers) {
       waiting: act?.waiting ?? false,
       active,
       context_pct: fill && fill.age_s <= CTX_STALE_S ? fill.used_pct : null,
+      lifecycle_idle_exempt: !!agent.lifecycle_idle_exempt,
     };
   }
   return {
@@ -3051,7 +3053,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/agents",           purpose: "filtered agent list",
           query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
         { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
-        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks (declare ALL periodic triggers: [{name,schedule,note,loads_agents}]).", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }], recurring_tasks: [{ name: "…", schedule: "alle 10 min", note: "…", loads_agents: false }] } },
+        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks (declare ALL periodic triggers: [{name,schedule,note,loads_agents}]), lifecycle_idle_exempt (bool: set true if your session must NOT be auto idle-shut-down — e.g. a long-running dispatcher; context-recycle still applies).", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }], recurring_tasks: [{ name: "…", schedule: "alle 10 min", note: "…", loads_agents: false }], lifecycle_idle_exempt: false } },
         { method: "GET",  path: "/api/agent-transcript",  purpose: "read-only recent session transcript of an agent (browser 'terminal' view). ?agent=<key>&limit=40" },
         { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
         { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached (+ self: version/commit)" },
@@ -3083,6 +3085,7 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
+        { method: "POST", path: "/api/agent-setting",    purpose: "operator toggle for per-agent lifecycle settings. lifecycle_idle_exempt=true skips auto idle-shutdown (context-recycle at ≥60% usable still applies to all).", body: { agent: "<key>", lifecycle_idle_exempt: true } },
         { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
           query: { refresh: "1 to bypass the 5 min cache" } },
         { method: "GET",  path: "/api/skills/body",      purpose: "full SKILL.md body (post-frontmatter) for one skill — for the UI detail panel",
@@ -3425,6 +3428,22 @@ async function handleApi(req, res, url) {
     await writeFillState(fillState);
     auditEvent("registry.self_update", { target: key }, `Self-update ${key}: ${Object.keys(applied).join(", ")}`).catch(() => {});
     return send(200, { ok: true, agent: key, applied });
+  }
+
+  // Operator-facing toggle from the dashboard for per-agent lifecycle settings.
+  // Currently: lifecycle_idle_exempt (skip auto idle-shutdown; context-recycle
+  // at ≥60% usable still applies to ALL agents, exempt or not).
+  if (req.method === "POST" && url.pathname === "/api/agent-setting") {
+    const body = (await readBody()) || {};
+    const key = body.agent;
+    if (!key) return send(400, { error: "missing_agent" });
+    const registry = await readRegistry();
+    if (!registry.agents[key]) return send(404, { error: "unknown_agent" });
+    if (typeof body.lifecycle_idle_exempt !== "boolean") return send(400, { error: "missing_lifecycle_idle_exempt" });
+    registry.agents[key].lifecycle_idle_exempt = body.lifecycle_idle_exempt;
+    await writeRegistryAtomic(registry);
+    auditEvent("agent.setting", { target: key }, `Idle-Exempt ${key} → ${body.lifecycle_idle_exempt}`).catch(() => {});
+    return send(200, { ok: true, agent: key, lifecycle_idle_exempt: body.lifecycle_idle_exempt });
   }
 
   // Live-chat: send a message from the dashboard straight into an agent's session
