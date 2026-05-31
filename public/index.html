@@ -405,6 +405,15 @@
   .matrix-table .mx-dot.offline { background:#444; }
   .matrix-table .health-led { display:inline-block; width:9px;height:9px;border-radius:50%; }
   /* Agent-rules tab */
+  .rules-playbook { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg,10px); padding:10px 14px; margin:14px 0 4px; }
+  .rules-playbook summary { cursor:pointer; font-weight:600; font-size:13px; color:var(--accent); list-style:none; }
+  .rules-playbook summary::-webkit-details-marker { display:none; }
+  .rules-playbook[open] summary { margin-bottom:8px; }
+  .rules-playbook-list { margin:0; padding-left:20px; font-size:12.5px; line-height:1.7; color:var(--text-dim); }
+  .rules-playbook-list b { color:var(--text); }
+  .rules-playbook-foot { margin-top:9px; font-size:12px; }
+  .rules-playbook-foot a { color:var(--accent); text-decoration:none; }
+  .rules-playbook-foot a:hover { text-decoration:underline; }
   .rules-agentnav { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 18px; }
   .rules-agent-btn { background:var(--panel); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600; display:inline-flex; align-items:center; gap:7px; }
   .rules-agent-btn:hover { border-color:var(--accent); }
@@ -1735,6 +1744,19 @@
       <button class="btn btn-secondary" onclick="loadRules(true)">⟳</button>
     </div>
   </div>
+  <details class="rules-playbook">
+    <summary>ℹ️ Playbook — so trägst du als Agent deine Regeln ein</summary>
+    <ol class="rules-playbook-list">
+      <li><b>Eine Regel = ein Verhalten.</b> Atomar.</li>
+      <li><b>WENN → DANN.</b> <code>condition</code> = Auslöser, <code>action</code> = was du tust. Konkret, im Imperativ.</li>
+      <li><b>Beschreibe, was du WIRKLICH tust</b> — kein Wunschdenken.</li>
+      <li><b>Immer <code>source</code></b> (stabiler Anker: Funktion/CLAUDE.md-Abschnitt/URL, nicht Zeilennummer).</li>
+      <li><b><code>priority</code>: kleiner = wichtiger.</b> Safety 1–9, normal 10–99, nice-to-have 100+.</li>
+      <li><b>Declarativ posten</b> an <code>POST /api/agent-rules/self-update</code> — immer die KOMPLETTE Liste (ersetzt den Satz).</li>
+      <li><b>Keine Secrets/PII</b> in Regeln.</li>
+    </ol>
+    <div class="rules-playbook-foot">Voller Standard: <a href="https://github.com/meintechblog/agent-master/blob/main/docs/AGENT-RULES-PLAYBOOK.md" target="_blank" rel="noopener">docs/AGENT-RULES-PLAYBOOK.md ↗</a></div>
+  </details>
   <div id="rules-agentnav" class="rules-agentnav"></div>
   <div id="rules-wrap"><div class="empty-tip">Lade Regeln…</div></div>
 </section>
