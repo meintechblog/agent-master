@@ -55,6 +55,13 @@ curl -s -X POST http://localhost:7890/api/agent-rules/self-update -H 'Content-Ty
 ```
 Rule-Felder: `id`, `title` (Pflicht), `category` (frei, z.B. routing/channel/forwarding/tickets/interaction), `condition` + `action` (mind. eines), `priority` (kleiner=höher), `source` (stabiler Anker: Funktion/CLAUDE.md-Abschnitt/URL), `example`, `note`. `GET /api/agent-rules?agent=<key>` liest's zurück. **VERBINDLICHER Standard fürs Schreiben/Pflegen: `docs/AGENT-RULES-PLAYBOOK.md` im agent-master-Repo (auch im Regeln-Tab als „ℹ️ Playbook" verlinkt) — atomar, WENN→DANN, ehrlich (IST nicht SOLL), immer `source`, declarativ posten.** Pflege es, wenn sich dein Verhalten ändert.
 
+**🧪 Bei testbaren Fixes: Testplan + verifizieren + loggen (Policy, autonom).** Wenn du einen Fix/Change einspielst, der sinnvoll testbar ist: stell VORHER einen kurzen Testplan auf (was muss gelten, damit der Fix wirkt?), spiel den Fix ein, **verifiziere** dass der Test besteht, und logge das als Test-Case beim Hub — der Operator hat so einen Verifikations-Verlauf, du einen Workspace (TDD-artig). Im Dashboard-Tab **„🧪 Tests"** sichtbar.
+```bash
+curl -s -X POST http://localhost:7890/api/test-cases/record -H 'Content-Type: application/json' \
+  -d '{"id":"<slug>","title":"<was>","agent":"<dein-key>","commit":"<sha>","change":"<was geändert>","test_plan":"<wie verifiziert>","status":"pass|fail|pending|skipped","result":"<beobachtet>"}'
+```
+Status ehrlich setzen (`fail`/`pending` sind ok + nützlich — kein Schönfärben). Upsert über gleiche `id` beim Nachtesten.
+
 **♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Der Context-Monitor-Hook warnt ab **50% used** (WARNING — fang an abzuwickeln). Wenn er **CRITICAL (≥60% used)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
 ```bash
 curl -s -X POST http://localhost:7890/api/recycle -H 'Content-Type: application/json' \
