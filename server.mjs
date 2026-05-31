@@ -1936,57 +1936,49 @@ async function stopAgent(repoKey, registry) {
   const log = (msg) =>
     fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} stop ${repoKey} ${msg}\n`).catch(() => {});
 
-  // Primary path: use the window-id we captured when we spawned the agent.
-  // The claudepeers expect-wrapper makes broker.tty ≠ Terminal-tab.tty (PTY
-  // indirection), so tty-matching alone is unreliable for spawn-API-launched
-  // sessions.
-  const ttyRaw = peer.tty || "";
-  const ttyFull = ttyRaw.startsWith("/dev/") ? ttyRaw : (ttyRaw ? `/dev/${ttyRaw}` : "");
-  let targetWid = spawnedWindows.get(repoKey) || null;
-  let targetTab = targetWid ? 1 : null; // We always Cmd+T into a new window/tab → tab index 1.
-  let findRaw = targetWid ? "(from-spawn-map)" : "";
-  await log(`begin pid=${peer.pid} tty=${ttyRaw} ttyFull=${ttyFull} mappedWid=${targetWid || "none"}`);
-
-  // Fallback path: session wasn't started via /api/spawn (user opened a Terminal
-  // tab manually and ran claudepeers there) → no entry in spawnedWindows.
-  // Try to match by tty. Works for legacy sessions started before the expect
-  // wrapper existed (where claude was the only PTY).
-  if (!targetWid && ttyFull) {
-    const findScript = `
-      tell application "Terminal"
-        set found to ""
-        repeat with w in windows
-          set wid to id of w
-          set i to 0
-          repeat with t in tabs of w
-            set i to i + 1
-            try
-              set tt to tty of t
-            on error
-              set tt to ""
-            end try
-            if tt is "${ttyFull}" then
-              set found to (wid as text) & ":" & (i as text)
-              exit repeat
-            end if
-          end repeat
-          if found is not "" then exit repeat
-        end repeat
-        return found
-      end tell
-    `;
+  // Resolve the Terminal window+tab to close. Order by reliability:
+  //  (1) tty-match over the process ANCESTRY — the claudepeers expect-wrapper
+  //      gives claude an inner PTY (peer.tty), but the login shell up the tree
+  //      shares the actual Terminal-tab tty. This survives recycles/reopens.
+  //  (2) the spawn-captured window-id — fast, but goes STALE after a recycle
+  //      (we hit exactly that with llm-master). So it's the fallback, not the
+  //      primary, and we only trust it if ancestry-tty finds nothing.
+  // Resolved BEFORE SIGTERM so the process tree is still walkable.
+  const norm = (t) => (t ? (t.startsWith("/dev/") ? t : `/dev/${t}`) : "");
+  const ttyCandidates = [];
+  if (peer.tty) ttyCandidates.push(norm(peer.tty));
+  if (peer.pid) { for (const t of await ancestorTtys(peer.pid)) if (!ttyCandidates.includes(t)) ttyCandidates.push(t); }
+  let targetWid = null;
+  let targetTab = null;
+  let findRaw = "";
+  for (const ttyFull of ttyCandidates) {
+    let r = "";
     try {
-      findRaw = await runOsa(findScript);
-    } catch (e) {
-      findRaw = `<err:${e.message}>`;
-    }
-    if (findRaw && !findRaw.startsWith("<err:")) {
-      const [w, t] = findRaw.split(":");
-      targetWid = parseInt(w, 10);
-      targetTab = parseInt(t, 10);
-    }
+      r = await runOsa(`
+        tell application "Terminal"
+          set found to ""
+          repeat with w in windows
+            set i to 0
+            repeat with t in tabs of w
+              set i to i + 1
+              try
+                if tty of t is "${ttyFull}" then set found to (id of w as text) & ":" & (i as text)
+              end try
+              if found is not "" then exit repeat
+            end repeat
+            if found is not "" then exit repeat
+          end repeat
+          return found
+        end tell
+      `);
+    } catch (e) { r = `<err:${e.message}>`; }
+    if (/^\d+:\d+$/.test(r)) { const [w, t] = r.split(":"); targetWid = parseInt(w, 10); targetTab = parseInt(t, 10); findRaw = `tty-match:${ttyFull}`; break; }
   }
-  await log(`lookup result="${findRaw}" wid=${targetWid} tab=${targetTab}`);
+  if (!targetWid) {
+    const mapped = spawnedWindows.get(repoKey) || null;
+    if (mapped) { targetWid = mapped; targetTab = 1; findRaw = "(from-spawn-map fallback)"; }
+  }
+  await log(`begin pid=${peer.pid} resolve="${findRaw}" wid=${targetWid} tab=${targetTab} ttyCands=${ttyCandidates.join(",")}`);
 
   // claude runs as a child of the claudepeers expect-wrapper. SIGTERM-ing only
   // claude leaves expect alive in the tab, which Terminal.app treats as a
@@ -2060,7 +2052,7 @@ async function stopAgent(repoKey, registry) {
     spawnedWindows.delete(repoKey);
     persistSpawnedWindows();
   }
-  return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty: ttyRaw, ttyFull, findRaw, targetWid, targetTab, closeErr } };
+  return { ok: true, agent: repoKey, signaled, tab_closed: tabClosed, peer_id: peer.id, debug: { tty_candidates: ttyCandidates, resolved: findRaw, targetWid, targetTab, closeErr } };
 }
 
 // Bring the agent's Terminal window to the front (the "↗ Terminal" button in the
