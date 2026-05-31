@@ -2793,7 +2793,12 @@ const IDLE_SHUTDOWN_MS = 3 * 60 * 60 * 1000; // 3h idle → clean shutdown
 const LIFECYCLE_GRACE_MS = 120_000;          // checkpoint window before acting
 const LIFECYCLE_COOLDOWN_MS = 20 * 60 * 1000;
 const CTX_STALE_S = 180;                      // ignore context metrics older than this (agent idle → not growing)
-const lifecycleState = new Map();             // key -> { action, grace_until, last_acted_at }
+const lifecycleState = new Map();             // key -> { action, grace_until }
+const lifecycleCooldown = new Map();          // key -> last_acted_at (ms)
+function st_cooldownActive(key, now) {
+  const t = lifecycleCooldown.get(key);
+  return !!t && now - t < LIFECYCLE_COOLDOWN_MS;
+}
 const lcLog = (m) => fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} lifecycle ${m}\n`).catch(() => {});
 
 async function lifecycleTick() {
@@ -2807,34 +2812,43 @@ async function lifecycleTick() {
       const live = resolveLive(agent, registry, liveByCwd);
       if (!live) { lifecycleState.delete(key); continue; }
       if (softStopState.has(key)) continue; // a soft-stop is already in flight
+      if (st_cooldownActive(key, now)) continue;
       const [fill, act] = await Promise.all([getAgentContextFill(live.cwd), getAgentActivity(live.cwd)]);
       const idleMs = act.last_activity_at ? now - act.last_activity_at : 0;
-      let want = null;
-      if (fill && fill.age_s <= CTX_STALE_S && fill.used_pct >= CTX_RECYCLE_PCT) want = "recycle";
-      else if (key !== "agent-master" && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
-
+      const critical = !!(fill && fill.age_s <= CTX_STALE_S && fill.used_pct >= CTX_RECYCLE_PCT);
       const st = lifecycleState.get(key) || {};
-      if (!want) { if (st.grace_until) lifecycleState.delete(key); continue; }
-      if (st.last_acted_at && now - st.last_acted_at < LIFECYCLE_COOLDOWN_MS) continue;
 
-      if (!st.grace_until || st.action !== want) {
-        // First detection (or action switched): wake + ask the agent to checkpoint, start grace.
-        const secs = Math.round(LIFECYCLE_GRACE_MS / 1000);
-        const msg = want === "recycle"
-          ? `[Hub Lifecycle] Dein Context ist bei ${fill.used_pct}% (CRITICAL). Sichere JETZT: Handoff ins Memory (Resume-/next-session-Datei + ggf. .planning/RESUME.md) + committe & pushe ALLES. Ich recycle deine Session in ~${secs}s automatisch — danach läuft eine frische Session mit „weiter" nahtlos weiter. Du musst nichts weiter tun, nur sauber sichern.`
-          : `[Hub Lifecycle] Du bist seit ~${Math.round(idleMs / 3600000)}h idle. Ich fahre deine Session in ~${secs}s sauber herunter (Stop, kein Respawn). Sichere JETZT: Handoff ins Memory + committe & pushe ALLES, damit kein Wissen verloren geht. Du wirst bei Bedarf einfach neu gespawnt.`;
-        lifecycleState.set(key, { action: want, grace_until: now + LIFECYCLE_GRACE_MS, detected_pct: fill?.used_pct, idle_h: Math.round(idleMs / 3600000) });
-        await sendChannelMessage(live.id, msg).catch((e) => lcLog(`${key} warn err: ${e.message}`));
-        await lcLog(`${key} detected=${want} pct=${fill?.used_pct ?? "?"} idleMs=${idleMs} → grace ${secs}s`);
-        auditEvent("lifecycle.warn", { target: key }, `Lifecycle ${want} angekündigt: ${key} (${want === "recycle" ? fill.used_pct + "% ctx" : Math.round(idleMs / 3600000) + "h idle"})`).catch(() => {});
-      } else if (now >= st.grace_until) {
-        // Grace elapsed → act.
-        lifecycleState.set(key, { last_acted_at: now });
-        await lcLog(`${key} act=${want} (grace elapsed)`);
-        auditEvent("lifecycle.act", { target: key }, `Lifecycle ${want} ausgeführt: ${key}`).catch(() => {});
-        if (want === "recycle") recycleAgent(key, registry).catch((e) => lcLog(`${key} recycle err: ${e.message}`));
-        else stopAgent(key, registry).catch((e) => lcLog(`${key} stop err: ${e.message}`));
+      // A pending action (grace running) is STICKY. We must NOT cancel an idle-
+      // shutdown just because our own checkpoint-prompt woke the agent (it saving
+      // resets its idle timer — expected). Only cancel a pending RECYCLE if the
+      // context genuinely dropped back below threshold (agent recycled/compacted).
+      if (st.grace_until) {
+        if (st.action === "recycle" && !critical) { lifecycleState.delete(key); continue; }
+        if (now >= st.grace_until) {
+          lifecycleState.delete(key);
+          lifecycleCooldown.set(key, now);
+          await lcLog(`${key} act=${st.action} (grace elapsed)`);
+          auditEvent("lifecycle.act", { target: key }, `Lifecycle ${st.action} ausgeführt: ${key}`).catch(() => {});
+          if (st.action === "recycle") recycleAgent(key, registry).catch((e) => lcLog(`${key} recycle err: ${e.message}`));
+          else stopAgent(key, registry).catch((e) => lcLog(`${key} stop err: ${e.message}`));
+        }
+        continue; // still within grace, or just acted
       }
+
+      // No pending action → fresh detection.
+      let want = null;
+      if (critical) want = "recycle";
+      else if (key !== "agent-master" && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
+      if (!want) continue;
+
+      const secs = Math.round(LIFECYCLE_GRACE_MS / 1000);
+      const msg = want === "recycle"
+        ? `[Hub Lifecycle] Dein Context ist bei ${fill.used_pct}% (CRITICAL). Sichere JETZT: Handoff ins Memory (Resume-/next-session-Datei + ggf. .planning/RESUME.md) + committe & pushe ALLES. Ich recycle deine Session in ~${secs}s automatisch — danach läuft eine frische Session mit „weiter" nahtlos weiter. Du musst nichts weiter tun, nur sauber sichern.`
+        : `[Hub Lifecycle] Du bist seit ~${Math.round(idleMs / 3600000)}h idle. Ich fahre deine Session in ~${secs}s sauber herunter (Stop, kein Respawn). Sichere JETZT: Handoff ins Memory + committe & pushe ALLES, damit kein Wissen verloren geht. Du wirst bei Bedarf einfach neu gespawnt.`;
+      lifecycleState.set(key, { action: want, grace_until: now + LIFECYCLE_GRACE_MS });
+      await sendChannelMessage(live.id, msg).catch((e) => lcLog(`${key} warn err: ${e.message}`));
+      await lcLog(`${key} detected=${want} pct=${fill?.used_pct ?? "?"} idleMs=${idleMs} → grace ${secs}s`);
+      auditEvent("lifecycle.warn", { target: key }, `Lifecycle ${want} angekündigt: ${key} (${want === "recycle" ? fill.used_pct + "% ctx" : Math.round(idleMs / 3600000) + "h idle"})`).catch(() => {});
     }
   } catch (e) {
     console.warn("[lifecycle] tick failed:", e.message);
