@@ -2185,6 +2185,7 @@ function renderTabs() {
     btn.innerHTML = `
       <span class="dot ${agent.live ? "live" : "offline"}"></span>
       <span class="tab-name">${key}</span>
+      ${agent.keep_alive ? `<span class="tab-keepalive" title="Dauerhaft aktiv (keep-alive) — wird bei Down automatisch neu gespawnt">🟢</span>` : ""}
       ${ghHtml}
       ${idleHtml}
       <span class="tab-llm-dots">${dotsHtml}</span>
@@ -2463,10 +2464,15 @@ function renderContent() {
     ${a.is_service ? "" : `
     <div class="panel-section">
       <h3>♻️ Lifecycle</h3>
-      <label class="idle-exempt-row" title="Wenn gesetzt, wird diese Session NICHT automatisch nach 3h Idle heruntergefahren. Context-Recycle bei ≥60% greift trotzdem.">
-        <input type="checkbox" id="idle-exempt-cb" ${a.lifecycle_idle_exempt ? "checked" : ""}
-               onchange="toggleIdleExempt('${active}', this.checked)">
-        <span>Bleibt bei Idle an <span style="color:var(--text-dim);font-weight:400">(kein Auto-Idle-Shutdown; Context-Recycle ≥60% gilt weiter)</span></span>
+      <label class="idle-exempt-row" title="Always-on: der Hub spawnt diese Session automatisch neu, wenn sie down ist, und fährt sie NIE wegen Idle herunter. Für Dispatcher/Dauerläufer (z.B. chat-llm-master).">
+        <input type="checkbox" id="keep-alive-cb" ${a.keep_alive ? "checked" : ""}
+               onchange="toggleLifecycle('${active}', 'keep_alive', this.checked)">
+        <span>🟢 Dauerhaft aktiv (keep-alive) <span style="color:var(--text-dim);font-weight:400">— Auto-Respawn wenn down · kein Idle-Shutdown</span></span>
+      </label>
+      <label class="idle-exempt-row" title="Schwächer als keep-alive: wird NICHT nach 3h Idle heruntergefahren, aber auch nicht automatisch neu gespawnt. Context-Recycle bei ≥60% greift trotzdem." style="${a.keep_alive ? "opacity:0.5;pointer-events:none" : ""}">
+        <input type="checkbox" id="idle-exempt-cb" ${(a.lifecycle_idle_exempt || a.keep_alive) ? "checked" : ""} ${a.keep_alive ? "disabled" : ""}
+               onchange="toggleLifecycle('${active}', 'lifecycle_idle_exempt', this.checked)">
+        <span>🌙 Bleibt bei Idle an <span style="color:var(--text-dim);font-weight:400">(nur kein Idle-Shutdown, kein Auto-Respawn)</span></span>
       </label>
     </div>`}
 
@@ -2909,17 +2915,18 @@ async function handleSoftStopCancel(key) {
   await postJson("/api/soft-stop-cancel", { agent: key }, `↩︎ Soft-Stop für ${key} abbrechen…`);
 }
 
-async function toggleIdleExempt(key, checked) {
+async function toggleLifecycle(key, field, checked) {
   // Light fetch — don't blow away the panel; SSE re-render reflects the new state.
+  const cbId = field === "keep_alive" ? "keep-alive-cb" : "idle-exempt-cb";
   try {
     const r = await fetch("/api/agent-setting", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: key, lifecycle_idle_exempt: checked }),
+      body: JSON.stringify({ agent: key, [field]: checked }),
     });
     const d = await r.json();
-    if (d.error) { alert("Fehler: " + d.error); const cb = document.getElementById("idle-exempt-cb"); if (cb) cb.checked = !checked; }
+    if (d.error) { alert("Fehler: " + d.error); const cb = document.getElementById(cbId); if (cb) cb.checked = !checked; }
   } catch (e) {
-    alert(e.message); const cb = document.getElementById("idle-exempt-cb"); if (cb) cb.checked = !checked;
+    alert(e.message); const cb = document.getElementById(cbId); if (cb) cb.checked = !checked;
   }
 }
 

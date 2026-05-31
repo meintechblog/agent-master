@@ -1488,7 +1488,14 @@ const REGISTRY_FILLABLE = new Set([
   "depends_on", "tags", "description", "display_name", "service_url",
   "live_dashboards", "repo_url", "recurring_tasks",
   "lifecycle_idle_exempt", // bool: skip auto idle-shutdown (NOT context-recycle)
+  "keep_alive",            // bool: always-on — auto-respawn if down + implies idle-exempt
 ]);
+
+// Always-on ("keep-alive") = the Hub actively ensures this agent's session is
+// running (respawn if down) AND never auto-idle-shuts it down. lifecycle_idle_exempt
+// is the weaker, passive variant (don't shut down, but don't force-respawn either).
+const isAlwaysOn = (agent) => !!agent?.keep_alive;
+const skipIdleShutdown = (agent) => !!(agent?.keep_alive || agent?.lifecycle_idle_exempt);
 
 function registryEntryIsThin(a) {
   const n = (x) => (Array.isArray(x) ? x.length : 0);
@@ -2821,10 +2828,45 @@ function st_cooldownActive(key, now) {
 }
 const lcLog = (m) => fs.appendFile(SPAWN_LOG, `${new Date().toISOString()} lifecycle ${m}\n`).catch(() => {});
 
+// Keep-alive: actively ensure every always-on agent has a running session,
+// respawning any that are down. Runs on every lifecycle tick AND right after any
+// manual spawn (so the always-on set is re-asserted whenever the fleet changes).
+// A per-agent cooldown prevents a crash-looping agent from re-opening a Terminal
+// window every 60s. The Hub itself (launchd/recycle-managed) and service-in-hub
+// entries (no own session) are never auto-spawned here.
+const KEEPALIVE_COOLDOWN_MS = 5 * 60 * 1000;
+const keepAliveCooldown = new Map(); // key -> last spawn-attempt (ms)
+async function ensureAlwaysOnRunning(registry, peers) {
+  const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
+  const now = Date.now();
+  for (const [key, agent] of Object.entries(registry.agents)) {
+    if (!isAlwaysOn(agent)) continue;
+    if (key === "agent-master") continue;          // Hub session is launchd/recycle-managed
+    if (isServiceInHub(agent)) continue;           // no independent session
+    if (softStopState.has(key)) continue;          // an intentional stop is in flight
+    if (resolveLive(agent, registry, liveByCwd)) continue; // already up
+    const last = keepAliveCooldown.get(key);
+    if (last && now - last < KEEPALIVE_COOLDOWN_MS) continue;
+    keepAliveCooldown.set(key, now);
+    await lcLog(`keep-alive: ${key} is down → respawning`);
+    auditEvent("lifecycle.keepalive_spawn", { target: key }, `Keep-alive Respawn: ${key} war down`).catch(() => {});
+    spawnAgent(key, registry).catch((e) => lcLog(`keep-alive ${key} spawn err: ${e.message}`));
+  }
+}
+
 async function lifecycleTick() {
+  let registry, peers;
+  try {
+    [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
+  } catch (e) {
+    console.warn("[lifecycle] tick fetch failed:", e.message);
+    return;
+  }
+  // Keep-alive runs even when the idle/recycle watcher is toggled off — it's a
+  // separate guarantee (always-on agents must always run).
+  await ensureAlwaysOnRunning(registry, peers).catch((e) => lcLog(`keepalive tick err: ${e.message}`));
   if (!LIFECYCLE_ENABLED) return;
   try {
-    const [registry, peers] = await Promise.all([readRegistry(), fetchPeers()]);
     const liveByCwd = new Map(peers.map((p) => [p.cwd, p]));
     const now = Date.now();
     for (const [key, agent] of Object.entries(registry.agents)) {
@@ -2858,7 +2900,7 @@ async function lifecycleTick() {
       // No pending action → fresh detection.
       let want = null;
       if (critical) want = "recycle";
-      else if (key !== "agent-master" && !agent.lifecycle_idle_exempt && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
+      else if (key !== "agent-master" && !skipIdleShutdown(agent) && act.last_activity_at && idleMs >= IDLE_SHUTDOWN_MS) want = "shutdown";
       if (!want) continue;
 
       const secs = Math.round(LIFECYCLE_GRACE_MS / 1000);
@@ -2919,6 +2961,7 @@ async function buildStatusPayload(registry, peers) {
       active,
       context_pct: fill && fill.age_s <= CTX_STALE_S ? fill.used_pct : null,
       lifecycle_idle_exempt: !!agent.lifecycle_idle_exempt,
+      keep_alive: !!agent.keep_alive,
     };
   }
   return {
@@ -3053,7 +3096,7 @@ async function handleApi(req, res, url) {
         { method: "GET",  path: "/api/agents",           purpose: "filtered agent list",
           query: { capability: "filter by capability", role: "Hub|Bridge|Domain|Infra", tag: "filter by tag", live: "true|false" } },
         { method: "GET",  path: "/api/registry",         purpose: "raw registry JSON" },
-        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks (declare ALL periodic triggers: [{name,schedule,note,loads_agents}]), lifecycle_idle_exempt (bool: set true if your session must NOT be auto idle-shut-down — e.g. a long-running dispatcher; context-recycle still applies).", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }], recurring_tasks: [{ name: "…", schedule: "alle 10 min", note: "…", loads_agents: false }], lifecycle_idle_exempt: false } },
+        { method: "POST", path: "/api/registry/self-update", purpose: "an agent patches its OWN registry entry (merged). Fields: capabilities, when_to_use, owned_endpoints, mqtt_topics, depends_on, tags, description, display_name, service_url, live_dashboards, repo_url, recurring_tasks (declare ALL periodic triggers: [{name,schedule,note,loads_agents}]), lifecycle_idle_exempt (bool: skip auto idle-shutdown — e.g. a long-running dispatcher; context-recycle still applies), keep_alive (bool: always-on — Hub auto-respawns you if down + never idle-shuts you down).", body: { agent: "<key>", capabilities: ["…"], when_to_use: ["…"], owned_endpoints: [{ method: "GET", path: "/api/…", purpose: "…" }], recurring_tasks: [{ name: "…", schedule: "alle 10 min", note: "…", loads_agents: false }], lifecycle_idle_exempt: false, keep_alive: false } },
         { method: "GET",  path: "/api/agent-transcript",  purpose: "read-only recent session transcript of an agent (browser 'terminal' view). ?agent=<key>&limit=40" },
         { method: "GET",  path: "/api/peers",            purpose: "broker peers + agent metadata merged" },
         { method: "GET",  path: "/api/health",           purpose: "HTTP health-check pings, 60 s cached (+ self: version/commit)" },
@@ -3085,7 +3128,7 @@ async function handleApi(req, res, url) {
         { method: "POST", path: "/api/soft-stop",        purpose: "soft-stop: ask agent to save & wrap up, hard-stop after 5 min if it doesn't extend", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-extend", purpose: "request +5 min extension (one-shot, callable by the agent itself via curl)", body: { agent: "<key>" } },
         { method: "POST", path: "/api/soft-stop-cancel", purpose: "abort a pending soft-stop, agent keeps running normally", body: { agent: "<key>" } },
-        { method: "POST", path: "/api/agent-setting",    purpose: "operator toggle for per-agent lifecycle settings. lifecycle_idle_exempt=true skips auto idle-shutdown (context-recycle at ≥60% usable still applies to all).", body: { agent: "<key>", lifecycle_idle_exempt: true } },
+        { method: "POST", path: "/api/agent-setting",    purpose: "operator toggle for per-agent lifecycle settings. keep_alive=true → always-on (Hub auto-respawns it if down + never idle-shuts it down). lifecycle_idle_exempt=true → weaker: skip idle-shutdown only (no auto-respawn). Context-recycle at ≥60% usable applies to all regardless.", body: { agent: "<key>", keep_alive: true, lifecycle_idle_exempt: true } },
         { method: "GET",  path: "/api/skills",           purpose: "all installed Claude Code skills (parsed from ~/.claude/skills/*/SKILL.md), grouped by cluster",
           query: { refresh: "1 to bypass the 5 min cache" } },
         { method: "GET",  path: "/api/skills/body",      purpose: "full SKILL.md body (post-frontmatter) for one skill — for the UI detail panel",
@@ -3439,11 +3482,15 @@ async function handleApi(req, res, url) {
     if (!key) return send(400, { error: "missing_agent" });
     const registry = await readRegistry();
     if (!registry.agents[key]) return send(404, { error: "unknown_agent" });
-    if (typeof body.lifecycle_idle_exempt !== "boolean") return send(400, { error: "missing_lifecycle_idle_exempt" });
-    registry.agents[key].lifecycle_idle_exempt = body.lifecycle_idle_exempt;
+    const applied = {};
+    if (typeof body.keep_alive === "boolean") { registry.agents[key].keep_alive = body.keep_alive; applied.keep_alive = body.keep_alive; }
+    if (typeof body.lifecycle_idle_exempt === "boolean") { registry.agents[key].lifecycle_idle_exempt = body.lifecycle_idle_exempt; applied.lifecycle_idle_exempt = body.lifecycle_idle_exempt; }
+    if (Object.keys(applied).length === 0) return send(400, { error: "no_setting", allowed: ["keep_alive", "lifecycle_idle_exempt"] });
     await writeRegistryAtomic(registry);
-    auditEvent("agent.setting", { target: key }, `Idle-Exempt ${key} → ${body.lifecycle_idle_exempt}`).catch(() => {});
-    return send(200, { ok: true, agent: key, lifecycle_idle_exempt: body.lifecycle_idle_exempt });
+    auditEvent("agent.setting", { target: key }, `Lifecycle-Setting ${key}: ${Object.entries(applied).map(([k, v]) => `${k}=${v}`).join(", ")}`).catch(() => {});
+    // Newly-enabled keep-alive: bring it up immediately if it's down.
+    if (applied.keep_alive === true) fetchPeers().then((ps) => ensureAlwaysOnRunning(registry, ps)).catch(() => {});
+    return send(200, { ok: true, agent: key, ...applied });
   }
 
   // Live-chat: send a message from the dashboard straight into an agent's session
@@ -4056,6 +4103,9 @@ async function handleApi(req, res, url) {
       const result = await spawnAgent(parsed.agent, registry);
       broadcastStatus();
       auditEvent("spawn.success", { target: parsed.agent }, `Spawn: ${parsed.agent}`).catch(() => {});
+      // Whenever we spawn, re-assert the always-on set (Jörg: "wenn du spawnst,
+      // kümmer dich drum dass die keep-alive-Agenten wirklich laufen").
+      fetchPeers().then((ps) => ensureAlwaysOnRunning(registry, ps)).catch(() => {});
       return send(200, { ok: true, ...result });
     } catch (e) {
       auditEvent("spawn.fail", { target: parsed.agent }, `Spawn FAIL ${parsed.agent}: ${e.message.slice(0, 80)}`).catch(() => {});
