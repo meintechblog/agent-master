@@ -11,12 +11,13 @@
 ## 0. TL;DR (in 30 Sekunden)
 
 1. **Eine Regel = ein Verhalten.** Atomar. Kein Absatz, keine Mehrfach-Regel.
-2. **WENN → DANN.** `condition` = der Auslöser, `action` = was du dann TUST. Konkret, im Imperativ.
-3. **Beschreibe, was du WIRKLICH tust** — nicht, was du tun solltest. Kein Wunschdenken.
-4. **Immer `source` angeben** (Code-Ref `pfad:zeile` / CLAUDE.md-Abschnitt / URL). Eine Regel ohne Quelle ist nicht wartbar.
-5. **`priority`: kleiner = wichtiger.** Safety/harte Regeln 1–9, normal 10–99, nice-to-have 100+.
-6. **Declarativ posten:** du sendest IMMER deine KOMPLETTE Liste, sie ersetzt den ganzen Satz. Bei Verhaltensänderung re-posten, veraltete Regeln entfernen.
-7. **Keine Secrets/PII** in Regeln (Tokens, private Nummern/Mails, fremde PII).
+2. **Stabile `id`.** Jede Regel hat einen eindeutigen, stabilen Slug → referenzierbar als `<agent>/<id>` (z.B. `agent-master/prefixless-not-topic-routed`). NIE umbenennen/umnummerieren.
+3. **WENN → DANN.** `condition` = der Auslöser, `action` = was du dann TUST. Konkret, im Imperativ.
+4. **Beschreibe, was du WIRKLICH tust** — nicht, was du tun solltest. Kein Wunschdenken.
+5. **Immer `source` angeben** (stabiler Anker: Funktion/CLAUDE.md-Abschnitt/URL, nicht Zeilennummer). Eine Regel ohne Quelle ist nicht wartbar.
+6. **`priority`: kleiner = wichtiger.** Safety/harte Regeln 1–9, normal 10–99, nice-to-have 100+.
+7. **Declarativ posten:** du sendest IMMER deine KOMPLETTE Liste, sie ersetzt den ganzen Satz. Bei Verhaltensänderung re-posten, veraltete Regeln entfernen.
+8. **Keine Secrets/PII** in Regeln (Tokens, private Nummern/Mails, fremde PII).
 
 ## 1. Wie du postest
 
@@ -38,7 +39,7 @@ curl -s -X POST http://localhost:7890/api/agent-rules/self-update \
 
 | Feld | Pflicht | Konvention |
 |---|---|---|
-| `id` | empfohlen | Stabiler kebab-case-Slug (`prefixless-to-brain`). Stabil halten über Re-Posts, damit eine Regel identifizierbar bleibt. Fehlt er, wird er aus Titel/Index abgeleitet. |
+| `id` | **ja** | Stabiler kebab-case-Slug (`prefixless-to-brain`). **Das ist der referenzierbare Handle der Regel:** zusammen mit deinem Agent-Key bildet er `<agent>/<id>` (z.B. `agent-master/prefixless-not-topic-routed`) — Jörg und andere Agenten zitieren Regeln genau darüber, und im Tab ist er klick-kopierbar. Deshalb: **eindeutig + STABIL halten** über Re-Posts (nicht umbenennen, nicht durchnummerieren — die laufende `#priority` ist KEIN Identifikator). Fehlt er, wird er notdürftig aus Titel/Index abgeleitet (dann ist er nicht stabil — also selbst setzen). |
 | `title` | **ja** | Kurze Substantiv-Phrase, ≤ ~60 Zeichen (`„Prefixlos → Brain"`). Kein ganzer Satz. |
 | `category` | empfohlen | Slug aus der [Taxonomie](#4-kategorie-taxonomie-empfohlen). Default `general`. |
 | `condition` | eines von beiden | Der Auslöser: „WENN …". Beobachtbar + konkret (`„Nachricht ohne @agent-Prefix"`), nicht vage (`„manchmal"`). |

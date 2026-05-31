@@ -424,7 +424,10 @@
   .rule-cat-title { font-size:12px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-dim); border-bottom:1px solid var(--border); padding-bottom:6px; margin:0 0 12px; }
   .rule-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
   .rule-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg,10px); padding:13px 15px; box-shadow:var(--shadow); }
-  .rule-card-head { display:flex; align-items:baseline; gap:9px; margin-bottom:9px; }
+  .rule-card-head { display:flex; align-items:baseline; gap:9px; margin-bottom:4px; }
+  .rule-id { display:inline-block; font-size:11px; color:var(--text-dim); background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:5px; padding:1px 7px; margin-bottom:9px; cursor:pointer; user-select:all; word-break:break-all; }
+  .rule-id:hover { border-color:var(--accent); color:var(--accent); }
+  .rule-id.copied { color:var(--green); border-color:var(--green); }
   .rule-prio { color:var(--text-dim); font-size:11px; font-variant-numeric:tabular-nums; font-weight:700; }
   .rule-title { font-weight:600; font-size:14px; color:var(--text); }
   .rule-line { font-size:13px; line-height:1.5; margin:3px 0; }
@@ -1748,6 +1751,7 @@
     <summary>ℹ️ Playbook — so trägst du als Agent deine Regeln ein</summary>
     <ol class="rules-playbook-list">
       <li><b>Eine Regel = ein Verhalten.</b> Atomar.</li>
+      <li><b>Stabile <code>id</code></b> → referenzierbar als <code>&lt;agent&gt;/&lt;id&gt;</code> (klick-kopierbar an jeder Karte). Nie umbenennen.</li>
       <li><b>WENN → DANN.</b> <code>condition</code> = Auslöser, <code>action</code> = was du tust. Konkret, im Imperativ.</li>
       <li><b>Beschreibe, was du WIRKLICH tust</b> — kein Wunschdenken.</li>
       <li><b>Immer <code>source</code></b> (stabiler Anker: Funktion/CLAUDE.md-Abschnitt/URL, nicht Zeilennummer).</li>
@@ -3102,6 +3106,16 @@ async function loadRules(force) {
   renderRules();
 }
 function selectRulesAgent(key) { rulesActiveAgent = key; renderRules(); }
+function copyRuleId(handle, el) {
+  const flash = () => { const o = el.textContent; el.textContent = "✓ kopiert"; el.classList.add("copied"); setTimeout(() => { el.textContent = o; el.classList.remove("copied"); }, 1200); };
+  // navigator.clipboard only exists in secure contexts (https/localhost). On a
+  // LAN-IP http dashboard it's undefined → fall back to a temp-textarea + execCommand.
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(handle).then(flash).catch(() => fallbackCopy(handle, flash)); }
+  else fallbackCopy(handle, flash);
+}
+function fallbackCopy(text, done) {
+  try { const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); done && done(); } catch {}
+}
 function renderRules() {
   const nav = document.getElementById("rules-agentnav");
   const wrap = document.getElementById("rules-wrap");
@@ -3133,18 +3147,22 @@ function renderRules() {
     const link = /^https?:\/\//.test(s) ? `<a href="${safe}" target="_blank" rel="noopener">${safe}</a>` : `<code>${safe}</code>`;
     return `<div class="rule-src" title="Quelle">📎 ${link}</div>`;
   };
-  const card = (r) => `
+  const card = (r) => {
+    const qid = `${rulesActiveAgent}/${r.id}`;
+    return `
     <div class="rule-card">
       <div class="rule-card-head">
         <span class="rule-prio" title="Priorität">#${r.priority ?? 100}</span>
         <span class="rule-title">${escapeHtml(r.title)}</span>
       </div>
+      <code class="rule-id" title="Referenzierbare ID — Klick zum Kopieren" onclick="copyRuleId('${escapeHtml(qid)}', this)">${escapeHtml(qid)}</code>
       ${r.condition ? `<div class="rule-line"><span class="rule-when">WENN</span> ${escapeHtml(r.condition)}</div>` : ""}
       ${r.action ? `<div class="rule-line"><span class="rule-then">DANN</span> ${escapeHtml(r.action)}</div>` : ""}
       ${r.example ? `<div class="rule-example">Beispiel: ${escapeHtml(r.example)}</div>` : ""}
       ${r.note ? `<div class="rule-note">${escapeHtml(r.note)}</div>` : ""}
       ${srcHtml(r.source)}
     </div>`;
+  };
   wrap.innerHTML = `
     <div class="rules-updated">Zuletzt aktualisiert: ${upd}</div>
     ${Object.keys(cats).sort().map((cat) => `
