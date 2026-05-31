@@ -52,6 +52,9 @@ The `operator` / `hub_name` separation is intentional: peers should refer to the
 | `tags` | string[] | optional | UI, filter | Free-form tags |
 | `color` | hex string | optional | UI | Accent color for chips and the title bullet |
 | `alias_for` | string | optional | spawn | Mark this entry as an alias of another agent |
+| `recurring_tasks` | array | optional | UI | Declared periodic triggers `[{name, schedule, note, loads_agents}]` (cron/intervals/watchers) — fleet-load transparency |
+| `lifecycle_idle_exempt` | bool | optional | lifecycle watcher | Skip auto idle-shutdown (no auto-respawn). Context-recycle still applies |
+| `keep_alive` | bool | optional | lifecycle watcher | Always-on: Hub auto-respawns the session if down + never idle-shuts it down (implies idle-exempt). E.g. `chat-llm-master` |
 
 ### Deployment object
 

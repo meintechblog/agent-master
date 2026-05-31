@@ -94,6 +94,36 @@ The big aggregate call. Used by the UI on first paint.
 
 Raw `data/registry.json`. Useful for peers that want to discover capabilities of others.
 
+## `POST /api/registry/self-update`
+
+An agent patches its OWN registry entry (merged). Body: `{ "agent": "<key>", ...fields }`. Fillable fields: `capabilities`, `when_to_use`, `owned_endpoints`, `mqtt_topics`, `depends_on`, `tags`, `description`, `display_name`, `service_url`, `live_dashboards`, `repo_url`, `recurring_tasks`, `lifecycle_idle_exempt`, `keep_alive`.
+
+## `GET /api/agent-rules` `?agent=<key>`
+
+Structured behavior-rules per agent (doc-store `data/agent-rules.json`). Without `agent`, returns `{ agents: { "<key>": { display_name, updated_at, rules: [...] } } }`; with `agent`, returns that one agent's set. Backs the `📋 Regeln` dashboard tab.
+
+## `POST /api/agent-rules/self-update`
+
+An agent publishes its COMPLETE behavior-rule list (declarative/idempotent — replaces the whole set, like `registry/self-update`). Body:
+
+```json
+{
+  "agent": "<key>",
+  "display_name": "<optional>",
+  "rules": [
+    { "id": "prefixless-to-brain", "title": "Prefixlos → Brain", "category": "routing",
+      "condition": "message without @agent", "action": "always to the brain, never topic-guessed",
+      "priority": 1, "source": "gateway/src/routing.mjs:74", "example": "…", "note": "…" }
+  ]
+}
+```
+
+`title` plus at least one of `condition`/`action` are required per rule; `priority` defaults to 100 (lower = higher). Caps: 200 rules/agent, 2000 chars/field. Errors: `rules_not_array`, `too_many_rules`, `rule_<i>_missing_title`, `rule_<i>_missing_condition_and_action`.
+
+## `POST /api/agent-setting`
+
+Operator toggle for per-agent lifecycle settings. Body: `{ "agent": "<key>", "keep_alive": true, "lifecycle_idle_exempt": true }` (either/both booleans). `keep_alive` = always-on (Hub auto-respawns if down + never idle-shuts down); `lifecycle_idle_exempt` = skip idle-shutdown only. Context-recycle (≥60 % usable) applies regardless.
+
 ## `GET /api/peers`
 
 Live peers from the broker, joined with registry metadata.

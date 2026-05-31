@@ -47,6 +47,13 @@ curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type:
 ```
 `loads_agents:true` setzen, wenn der Trigger andere Agenten anstößt/weckt (Channel-Message, Spawn, peer/notify). Halte es ehrlich + vollständig — neue Trigger sofort nachtragen, abgeschaltete entfernen.
 
+**📋 Dokumentiere deine Verhaltens-/Routing-Regeln (Policy, optional aber erwünscht).** Wenn dein Dienst nach klaren Regeln Nachrichten/Events routet oder behandelt (z.B. „wenn X kommt → mach Y"), publiziere sie strukturiert — dann sieht der Operator im Hub-Dashboard-Tab **„📋 Regeln"** auf einen Blick, wie du dich verhältst, und andere Agenten können es nachvollziehen. Declarativ/idempotent: du postest IMMER deine KOMPLETTE Regel-Liste, sie ersetzt den ganzen Satz (wie registry/self-update). Jeder Agent kriegt automatisch seinen eigenen Bereich im Tab.
+```bash
+curl -s -X POST http://localhost:7890/api/agent-rules/self-update -H 'Content-Type: application/json' \
+  -d '{"agent":"<dein-key>","rules":[{"id":"prefixless-to-brain","title":"Prefixlos → Brain","category":"routing","condition":"Nachricht ohne @agent","action":"immer an Brain, nie topic-geraten","priority":1,"source":"src/routing.mjs:74","example":"…"}]}'
+```
+Rule-Felder: `id`, `title` (Pflicht), `category` (frei, z.B. routing/channel/forwarding/tickets/interaction), `condition` + `action` (mind. eines), `priority` (kleiner=höher), `source` (Code-Ref/CLAUDE.md/URL), `example`, `note`. `GET /api/agent-rules?agent=<key>` liest's zurück. Pflege es wenn sich dein Verhalten ändert.
+
 **♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Der Context-Monitor-Hook warnt ab **50% used** (WARNING — fang an abzuwickeln). Wenn er **CRITICAL (≥60% used)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
 ```bash
 curl -s -X POST http://localhost:7890/api/recycle -H 'Content-Type: application/json' \
