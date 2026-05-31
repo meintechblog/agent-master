@@ -46,7 +46,7 @@ curl -s -X POST http://localhost:7890/api/registry/self-update -H 'Content-Type:
 ```
 `loads_agents:true` setzen, wenn der Trigger andere Agenten anstößt/weckt (Channel-Message, Spawn, peer/notify). Halte es ehrlich + vollständig — neue Trigger sofort nachtragen, abgeschaltete entfernen.
 
-**♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Wenn dein Context-Monitor-Hook **CRITICAL (≥75%)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
+**♻️ Context-Window-Selbst-Recycle (Policy, autonom).** Der Context-Monitor-Hook warnt ab **50% used** (WARNING — fang an abzuwickeln). Wenn er **CRITICAL (≥60% used)** meldet (oder `ctx-fill` das zeigt): bring deinen aktuellen atomaren Schritt zu Ende, dann **(1)** schreib einen sauberen Handoff in dein Memory (Resume-/`next-session`-Datei + ggf. `.planning/RESUME.md`), **(2)** committe + pushe alles, **(3)** ruf den Hub:
 ```bash
 curl -s -X POST http://localhost:7890/api/recycle -H 'Content-Type: application/json' \
   -d '{"agent":"<dein-key>","requested_by":"agent","reason":"context full"}'
